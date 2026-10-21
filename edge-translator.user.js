@@ -1,10 +1,12 @@
 // ==UserScript==
-// @name         双语网页翻译（Edge）
-// @namespace    https://github.com/qinmuran0316
-// @version      0.1.0
-// @description  在 Edge 上用微软 / MyMemory / Google 免费接口翻译网页：双语对照、划词翻译、快捷键、恢复原文
+// @name         PageLingo — 双语网页翻译
+// @namespace    https://github.com/qinmuran0316/PageLingo
+// @version      0.2.0
+// @description  PageLingo：用微软 / DeepL / Google / MyMemory 翻译网页，通用文本块识别、双语对照、划词翻译、快捷键
 // @author       qinmuran0316
 // @license      MIT
+// @homepageURL  https://github.com/qinmuran0316/PageLingo
+// @supportURL   https://github.com/qinmuran0316/PageLingo/issues
 // @match        http://*/*
 // @match        https://*/*
 // @exclude      *://edge.microsoft.com/*
@@ -18,6 +20,8 @@
 // @connect      edge.microsoft.com
 // @connect      api.mymemory.translated.net
 // @connect      translate.googleapis.com
+// @connect      api-free.deepl.com
+// @connect      api.deepl.com
 // @run-at       document-idle
 // @noframes
 // ==/UserScript==
@@ -28,7 +32,7 @@
   if (window.__EDGE_TRANSLATOR_LOADED__) return;
   window.__EDGE_TRANSLATOR_LOADED__ = true;
 
-  const VERSION = '0.1.0';
+  const VERSION = '0.2.0';
   const HOST_ID = 'et-translator-host';
   const STYLE_ID = 'et-page-style';
   const SETTINGS_KEY = 'et:settings:v1';
@@ -41,39 +45,28 @@
   const CACHE_MAX_BYTES = 2 * 1024 * 1024;
   const DEBUG = false;
 
-  const AUTO_ORDER = ['microsoft', 'mymemory'];
+  const AUTO_ORDER = ['microsoft', 'deepl', 'google'];
   const PROVIDER_LABELS = {
     microsoft: '微软',
-    mymemory: 'MyMemory',
+    deepl: 'DeepL',
     google: 'Google',
+    mymemory: 'MyMemory',
   };
   const TARGETS = {
-    'zh-CN': { label: '简体中文', microsoft: 'zh-Hans', google: 'zh-CN', mymemory: 'zh-CN' },
-    'zh-TW': { label: '繁體中文', microsoft: 'zh-Hant', google: 'zh-TW', mymemory: 'zh-TW' },
-    en: { label: 'English', microsoft: 'en', google: 'en', mymemory: 'en' },
-    ja: { label: '日本語', microsoft: 'ja', google: 'ja', mymemory: 'ja' },
-    ko: { label: '한국어', microsoft: 'ko', google: 'ko', mymemory: 'ko' },
+    'zh-CN': { label: '简体中文', microsoft: 'zh-Hans', deepl: 'ZH-HANS', google: 'zh-CN', mymemory: 'zh-CN' },
+    'zh-TW': { label: '繁體中文', microsoft: 'zh-Hant', deepl: 'ZH-HANT', google: 'zh-TW', mymemory: 'zh-TW' },
+    en: { label: 'English', microsoft: 'en', deepl: 'EN-US', google: 'en', mymemory: 'en' },
+    ja: { label: '日本語', microsoft: 'ja', deepl: 'JA', google: 'ja', mymemory: 'ja' },
+    ko: { label: '한국어', microsoft: 'ko', deepl: 'KO', google: 'ko', mymemory: 'ko' },
   };
   const PROVIDER_OPTIONS = [
     { value: 'auto', label: '自动选择' },
-    { value: 'microsoft', label: '微软（推荐）' },
-    { value: 'mymemory', label: 'MyMemory' },
+    { value: 'microsoft', label: '微软（免费推荐）' },
+    { value: 'deepl', label: 'DeepL（需 Key）' },
     { value: 'google', label: 'Google' },
+    { value: 'mymemory', label: 'MyMemory（质量较低）' },
   ];
 
-  const BLOCK_SELECTOR = 'p,li,h1,h2,h3,h4,h5,h6,td,th,dd,dt,blockquote,figcaption,caption';
-  const CONTENT_ROOT_SELECTOR = [
-    'main',
-    'article',
-    '[role="main"]',
-    '.markdown-body',
-    '.prose',
-    '.article-content',
-    '.post-content',
-    '.entry-content',
-    '.rich-text',
-    '#content',
-  ].join(',');
   const SITE_SKIP_SELECTOR = [
     '.blob-code',
     '.blob-num',
@@ -96,24 +89,54 @@
     '[contenteditable=""]',
     '[contenteditable="true"]',
     '[contenteditable="plaintext-only"]',
+    '[contenteditable]',
     '[translate="no"]',
+    '.notranslate',
     '.et-translation',
     '#' + HOST_ID,
     '[role="textbox"]',
     '[aria-hidden="true"]',
+    '[hidden]',
+    'svg',
+    'math',
+    'canvas',
+    'iframe',
+    'object',
+    'embed',
+    'audio',
+    'video',
+    'button',
+    '[role="button"]',
+    '[role="tab"]',
+    '[role="menuitem"]',
+    '[role="menu"]',
+    '[role="menubar"]',
+    'summary',
   ].join(',');
   const CHROME_SELECTOR = 'nav,aside,footer,header,[role="navigation"],[role="banner"],[role="contentinfo"]';
-  const INLINE_CHILD_TAGS = new Set([
-    'A', 'SPAN', 'STRONG', 'B', 'EM', 'I', 'U', 'S', 'SMALL', 'BR', 'IMG', 'SUP', 'SUB', 'MARK',
-    'ABBR', 'TIME', 'CITE', 'Q', 'DEL', 'INS', 'WBR', 'BDI', 'BDO', 'FONT',
+  const TEXT_FLOW_TAGS = new Set([
+    'P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'TD', 'TH', 'DD', 'DT',
+    'BLOCKQUOTE', 'FIGCAPTION', 'CAPTION', 'LABEL',
+  ]);
+  const INLINE_DISPLAYS = new Set([
+    'inline',
+    'contents',
+    'ruby',
+    'ruby-base',
+    'ruby-text',
+    'ruby-base-container',
+    'ruby-text-container',
   ]);
 
   const DEFAULTS = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     provider: 'auto',
     targetLang: 'zh-CN',
     autoFallback: true,
+    allowLowQuality: false,
     selection: true,
+    fullPage: false,
+    deeplKey: '',
     shortcuts: { toggle: 'Alt+T', panel: 'Alt+O' },
     position: null,
     sites: {},
@@ -138,6 +161,7 @@
       .replace(/\u00a0/g, ' ')
       .replace(/[ \t\f\v]+/g, ' ')
       .replace(/\s*\n\s*/g, ' ')
+      .replace(/\s+([,.;:!?，。；：！？])/g, '$1')
       .trim();
   }
 
@@ -296,10 +320,18 @@
           new ProviderError(
             status === 429
               ? '接口限流'
-              : status === 401 || status === 403
-                ? '接口拒绝访问'
-                : `接口请求失败（HTTP ${status || '未知'}）${body ? '：' + body : ''}`,
-            status === 429 ? 'rate' : status === 401 || status === 403 ? 'denied' : 'http',
+              : status === 456
+                ? '接口免费额度已用完'
+                : status === 401 || status === 403
+                  ? '接口拒绝访问'
+                  : `接口请求失败（HTTP ${status || '未知'}）${body ? '：' + body : ''}`,
+            status === 429
+              ? 'rate'
+              : status === 456
+                ? 'quota'
+                : status === 401 || status === 403
+                  ? 'denied'
+                  : 'http',
             status,
             retryAfter
           )
@@ -393,11 +425,15 @@
       sites: parsed.sites && typeof parsed.sites === 'object' ? { ...parsed.sites } : {},
     };
     if (!TARGETS[merged.targetLang]) merged.targetLang = base.targetLang;
-    if (!['auto', 'microsoft', 'mymemory', 'google'].includes(merged.provider)) {
+    if (!['auto', 'microsoft', 'deepl', 'google', 'mymemory'].includes(merged.provider)) {
       merged.provider = base.provider;
     }
+    merged.schemaVersion = 2;
     merged.autoFallback = merged.autoFallback !== false;
     merged.selection = merged.selection !== false;
+    merged.allowLowQuality = merged.allowLowQuality === true;
+    merged.fullPage = merged.fullPage === true;
+    merged.deeplKey = typeof merged.deeplKey === 'string' ? merged.deeplKey.trim() : '';
     return merged;
   }
 
@@ -473,8 +509,9 @@
 
   const providerStates = {
     microsoft: createProviderState(),
-    mymemory: createProviderState(),
+    deepl: createProviderState(),
     google: createProviderState(),
+    mymemory: createProviderState(),
   };
 
   function createProviderState() {
@@ -504,11 +541,21 @@
 
   function getProviderOrder() {
     if (settings.provider === 'auto') {
-      return settings.autoFallback ? [...AUTO_ORDER] : [AUTO_ORDER[0]];
+      const order = ['microsoft'];
+      if (!settings.autoFallback) return order;
+      if (settings.deeplKey) order.push('deepl');
+      order.push('google');
+      if (settings.allowLowQuality) order.push('mymemory');
+      return order;
     }
-    const first = settings.provider;
-    if (!settings.autoFallback) return [first];
-    return [first, ...AUTO_ORDER.filter((name) => name !== first)];
+
+    const order = [settings.provider];
+    if (!settings.autoFallback) return order;
+    for (const name of AUTO_ORDER) {
+      if (name !== settings.provider && (name !== 'deepl' || settings.deeplKey)) order.push(name);
+    }
+    if (settings.allowLowQuality && settings.provider !== 'mymemory') order.push('mymemory');
+    return order;
   }
 
   function noteProviderFailure(name, err) {
@@ -660,10 +707,50 @@
     return out;
   }
 
+  async function deeplTranslate(texts, targetLang) {
+    const key = String(settings.deeplKey || '').trim();
+    if (!key) {
+      throw new ProviderError('请先在设置中填写 DeepL API Key', 'environment');
+    }
+    const url = key.endsWith(':fx')
+      ? 'https://api-free.deepl.com/v2/translate'
+      : 'https://api.deepl.com/v2/translate';
+    const response = await gmRequest({
+      method: 'POST',
+      url,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'DeepL-Auth-Key ' + key,
+      },
+      data: JSON.stringify({
+        text: texts,
+        target_lang: TARGETS[targetLang].deepl,
+        preserve_formatting: true,
+      }),
+    });
+    let data;
+    try {
+      data = JSON.parse(response.text);
+    } catch (err) {
+      throw new ProviderError('DeepL 返回了无法解析的数据', 'protocol');
+    }
+    if (!data || !Array.isArray(data.translations) || data.translations.length !== texts.length) {
+      throw new ProviderError('DeepL 返回数量不一致', 'protocol');
+    }
+    return data.translations.map((item, index) => {
+      const text = item && item.text;
+      if (typeof text !== 'string' || !text.trim()) {
+        throw new ProviderError(`DeepL 第 ${index + 1} 段译文为空`, 'protocol');
+      }
+      return text.trim();
+    });
+  }
+
   const providerImpl = {
     microsoft: microsoftTranslate,
-    mymemory: mymemoryTranslate,
+    deepl: deeplTranslate,
     google: googleTranslate,
+    mymemory: mymemoryTranslate,
   };
 
   let providerChain = Promise.resolve();
@@ -840,34 +927,71 @@
   // 段落提取
   // ---------------------------------------------------------------------------
 
-  const DIV_QUERY_SELECTOR = CONTENT_ROOT_SELECTOR.split(',')
-    .map((part) => part.trim() + ' div')
-    .join(',');
+  const TEXT_SPACED_TAGS = new Set([
+    'A', 'P', 'DIV', 'SECTION', 'ARTICLE', 'MAIN', 'HEADER', 'FOOTER', 'NAV', 'ASIDE',
+    'UL', 'OL', 'LI', 'DL', 'DT', 'DD', 'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TD', 'TH',
+    'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'FIGCAPTION', 'CAPTION', 'LABEL',
+    'FORM', 'FIELDSET',
+  ]);
+  const TEXT_SKIP_SELECTOR = [
+    '.et-translation',
+    'script',
+    'style',
+    'noscript',
+    'template',
+    'pre',
+    'code',
+    'kbd',
+    'samp',
+    '[hidden]',
+    '[aria-hidden="true"]',
+    '[translate="no"]',
+    '.notranslate',
+    '[contenteditable]',
+    'button',
+    '[role="button"]',
+    '[role="tab"]',
+    '[role="menuitem"]',
+    '[role="menu"]',
+    '[role="menubar"]',
+    'summary',
+    'svg',
+    'math',
+    'canvas',
+    'iframe',
+    'object',
+    'embed',
+    'audio',
+    'video',
+    'textarea',
+    'input',
+    'select',
+    'option',
+  ].join(',');
+
+  function extractNodeText(node) {
+    if (node.nodeType === 3) return node.nodeValue || '';
+    if (node.nodeType !== 1) return '';
+    if (node.matches(TEXT_SKIP_SELECTOR)) return '';
+    if (node.tagName === 'BR') return ' ';
+
+    let text = '';
+    for (const child of node.childNodes) {
+      text += extractNodeText(child);
+    }
+    if (TEXT_SPACED_TAGS.has(node.tagName)) return ' ' + text + ' ';
+    return text;
+  }
 
   function getSourceText(el) {
-    if (!el.querySelector('.et-translation')) {
-      return normalizeText(el.textContent);
-    }
-    const clone = el.cloneNode(true);
-    clone
-      .querySelectorAll('.et-translation,script,style,noscript,[hidden],[aria-hidden="true"]')
-      .forEach((node) => node.remove());
-    return normalizeText(clone.textContent);
+    return normalizeText(extractNodeText(el));
   }
 
   function isChromeElement(el) {
+    if (settings.fullPage) return false;
     const chrome = el.closest(CHROME_SELECTOR);
     if (!chrome) return false;
     return !chrome.closest('main,article,[role="main"]');
-  }
-
-  function hasNestedBlock(el) {
-    const nodes = el.querySelectorAll(BLOCK_SELECTOR);
-    for (const node of nodes) {
-      if (node.closest('.et-translation')) continue;
-      if (normalizeText(node.textContent).length >= 4) return true;
-    }
-    return false;
   }
 
   function isWorthTranslating(text) {
@@ -900,13 +1024,13 @@
     return true;
   }
 
-  function isEligibleBlock(el) {
+  function isEligibleTextBlock(el) {
     if (!el || !el.isConnected || !el.tagName) return false;
+    if (el === document.body || el === document.documentElement) return false;
     if (el.closest('#' + HOST_ID + ',.et-translation')) return false;
     if (el.closest(SKIP_CLOSEST_SELECTOR) || el.closest(SITE_SKIP_SELECTOR)) return false;
     if (isChromeElement(el)) return false;
     if (el.getAttribute('translate') === 'no') return false;
-    if (hasNestedBlock(el)) return false;
 
     const state = elementStates.get(el);
     if (state && (state.status === 'done' || state.status === 'queued' || state.status === 'active')) {
@@ -916,42 +1040,103 @@
     return isWorthTranslating(text);
   }
 
-  function isEligibleDiv(el) {
-    if (!el || !el.isConnected || el.tagName !== 'DIV') return false;
-    if (el.closest('#' + HOST_ID + ',.et-translation')) return false;
-    if (el.closest(SKIP_CLOSEST_SELECTOR) || el.closest(SITE_SKIP_SELECTOR)) return false;
-    if (isChromeElement(el)) return false;
-    if (el.getAttribute('translate') === 'no') return false;
-    if (!el.closest(CONTENT_ROOT_SELECTOR)) return false;
-    if (el.querySelector(BLOCK_SELECTOR)) return false;
+  function isBlockLikeDisplay(display) {
+    return !!display && display !== 'none' && !INLINE_DISPLAYS.has(display);
+  }
 
-    for (const child of el.children) {
-      if (!INLINE_CHILD_TAGS.has(child.tagName)) return false;
+  function isInlineBoxDisplay(display) {
+    return (
+      display === 'inline-block' ||
+      display === 'inline-flex' ||
+      display === 'inline-grid' ||
+      display === 'inline-table'
+    );
+  }
+
+  function hasDirectText(el) {
+    for (const node of el.childNodes) {
+      if (node.nodeType === 3 && normalizeText(node.nodeValue)) return true;
     }
-    const text = getSourceText(el);
-    return text.length >= 40 && isWorthTranslating(text);
+    return false;
   }
 
   function collectCandidates(root) {
     const found = new Set();
-    const base = root && root.nodeType === 9 ? root.documentElement : root;
-    if (!base || !base.isConnected) return [];
+    const base = root && root.nodeType === 9 ? (root.body || root.documentElement) : root;
+    if (!base || !base.isConnected || base.nodeType !== 1) return [];
+    if (base.closest('#' + HOST_ID + ',.et-translation')) return [];
 
-    if (base.nodeType === 1 && base.matches(BLOCK_SELECTOR) && isEligibleBlock(base)) {
-      found.add(base);
-    }
+    const displayCache = new WeakMap();
+    const getStyle = (el) => {
+      let style = displayCache.get(el);
+      if (!style) {
+        try {
+          style = getComputedStyle(el);
+        } catch (err) {
+          style = null;
+        }
+        displayCache.set(el, style);
+      }
+      return style;
+    };
+    const isHidden = (style) =>
+      !style ||
+      style.display === 'none' ||
+      style.visibility === 'hidden' ||
+      style.visibility === 'collapse';
+    const isSkippedNode = (el) =>
+      el.matches(SKIP_CLOSEST_SELECTOR) || !!el.closest(SITE_SKIP_SELECTOR);
 
-    if (base.querySelectorAll) {
-      for (const el of base.querySelectorAll(BLOCK_SELECTOR)) {
-        if (isEligibleBlock(el)) found.add(el);
+    const visit = (el) => {
+      if (!el.isConnected || isSkippedNode(el)) return;
+      const style = getStyle(el);
+      if (isHidden(style)) return;
+
+      if (INLINE_DISPLAYS.has(style.display)) {
+        for (const child of el.children) visit(child);
+        return;
       }
-      for (const el of base.querySelectorAll(DIV_QUERY_SELECTOR)) {
-        if (isEligibleDiv(el)) found.add(el);
+
+      const flowText = TEXT_FLOW_TAGS.has(el.tagName);
+      const directText = hasDirectText(el);
+      const blockChildren = [];
+      for (const child of el.children) {
+        if (isSkippedNode(child)) continue;
+        const childStyle = getStyle(child);
+        if (isHidden(childStyle)) continue;
+        if (childStyle.display === 'contents') {
+          if (normalizeText(child.textContent)) blockChildren.push(child);
+          continue;
+        }
+        if (!isBlockLikeDisplay(childStyle.display)) continue;
+        if (isInlineBoxDisplay(childStyle.display) && (flowText || directText)) continue;
+        if (!normalizeText(child.textContent)) continue;
+        blockChildren.push(child);
       }
-      if (base.nodeType === 1 && base.tagName === 'DIV' && isEligibleDiv(base)) {
-        found.add(base);
+
+      if (!blockChildren.length) {
+        if (isEligibleTextBlock(el)) found.add(el);
+        return;
       }
-    }
+
+      if (
+        directText &&
+        (flowText || (blockChildren.length <= 2 && normalizeText(el.textContent).length <= 260))
+      ) {
+        if (isEligibleTextBlock(el)) found.add(el);
+        return;
+      }
+
+      const blockSet = new Set(blockChildren);
+      for (const child of blockChildren) visit(child);
+      for (const child of el.children) {
+        if (blockSet.has(child)) continue;
+        const childStyle = getStyle(child);
+        if (childStyle && childStyle.display === 'contents') visit(child);
+      }
+    };
+
+    visit(base);
     return Array.from(found);
   }
 
@@ -1050,6 +1235,15 @@
     recheckTimers.set(el, timer);
   }
 
+  function findStatefulAncestor(start) {
+    let node = start;
+    while (node && node !== document.body) {
+      if (elementStates.has(node)) return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+
   function handleMutations(records) {
     if (!session.active) return;
     for (const record of records) {
@@ -1057,14 +1251,14 @@
         for (const node of record.addedNodes) {
           if (node.nodeType !== 1 || isOwnNode(node)) continue;
           pendingScanRoots.add(node);
-          const parentCandidate = node.parentElement && node.parentElement.closest(BLOCK_SELECTOR);
-          if (parentCandidate && elementStates.has(parentCandidate)) scheduleRecheck(parentCandidate);
+          const parentCandidate = findStatefulAncestor(node.parentElement);
+          if (parentCandidate) scheduleRecheck(parentCandidate);
         }
       } else if (record.type === 'characterData') {
         const parent = record.target && record.target.parentElement;
         if (!parent || parent.closest('.et-translation,#' + HOST_ID)) continue;
-        const el = parent.closest(BLOCK_SELECTOR);
-        if (el && elementStates.has(el)) scheduleRecheck(el);
+        const el = findStatefulAncestor(parent);
+        if (el) scheduleRecheck(el);
       }
     }
     if (pendingScanRoots.size) scheduleScan();
@@ -1141,7 +1335,32 @@
     node.dir = 'auto';
     node.dataset.et = 'translation';
     node.dataset.state = 'loading';
-    el.appendChild(node);
+
+    const style = getComputedStyle(el);
+    const parent = el.parentElement;
+    const parentStyle = parent ? getComputedStyle(parent) : null;
+    const isFlex = style.display.includes('flex');
+    const isGrid = style.display.includes('grid');
+    const parentIsLayout =
+      parentStyle && (parentStyle.display.includes('flex') || parentStyle.display.includes('grid'));
+    const keepInside = el.matches('td,th,li') || !parent || parentIsLayout;
+
+    if ((isFlex || isGrid) && !keepInside) {
+      parent.insertBefore(node, el.nextSibling);
+    } else {
+      el.appendChild(node);
+      if (isFlex || isGrid) {
+        node.style.flexShrink = '1';
+        node.style.width = '100%';
+        if (isGrid) {
+          node.style.gridColumn = '1 / -1';
+        } else {
+          const direction = style.flexDirection || 'row';
+          if (!direction.startsWith('column')) node.style.flexBasis = '100%';
+        }
+      }
+    }
+
     state.translationEl = node;
     session.translations.add(node);
   }
@@ -1296,8 +1515,9 @@
       return null;
     }
 
-    const maxTexts = provider === 'microsoft' ? MAX_BATCH_ITEMS : 1;
-    const maxJobs = provider === 'microsoft' ? 24 : 1;
+    const supportsBatch = provider === 'microsoft' || provider === 'deepl';
+    const maxTexts = supportsBatch ? MAX_BATCH_ITEMS : 1;
+    const maxJobs = supportsBatch ? 24 : 1;
     const selected = [];
     const selectedSet = new Set();
     const texts = new Set();
@@ -1795,12 +2015,12 @@ details.more[open] summary { margin-bottom: 8px; }
 
     shadow.innerHTML = `
 <style>${UI_CSS}</style>
-<button class="fab" type="button" data-state="off" aria-label="翻译网页" aria-expanded="false">
+<button class="fab" type="button" data-state="off" aria-label="PageLingo 网页翻译" aria-expanded="false">
   <span class="glyph">译</span><span class="dot"></span>
 </button>
-<section class="panel" role="dialog" aria-label="双语网页翻译设置" hidden>
+<section class="panel" role="dialog" aria-label="PageLingo 双语网页翻译设置" hidden>
   <div class="panel-head">
-    <div class="panel-title">双语网页翻译<span class="panel-version">v${VERSION}</span></div>
+    <div class="panel-title">PageLingo<span class="panel-version">v${VERSION}</span></div>
     <button class="icon-btn" type="button" data-role="close" aria-label="关闭">×</button>
   </div>
   <button class="primary" type="button" data-role="toggle">翻译此页</button>
@@ -1819,10 +2039,19 @@ details.more[open] summary { margin-bottom: 8px; }
   </div>
   <div class="checks">
     <label class="check"><input type="checkbox" data-field="autoFallback">接口失败时自动回退</label>
+    <label class="check"><input type="checkbox" data-field="allowLowQuality">允许 MyMemory 低质量兜底</label>
+    <label class="check"><input type="checkbox" data-field="fullPage">全页模式（含导航/侧栏，实验）</label>
     <label class="check"><input type="checkbox" data-field="selection">划词翻译</label>
     <label class="check"><input type="checkbox" data-field="siteAuto">本网站自动翻译</label>
     <label class="check"><input type="checkbox" data-field="siteDisabled">禁用本网站</label>
   </div>
+  <details class="more" data-role="deepl-box">
+    <summary>DeepL 高质量接口（可选）</summary>
+    <label class="field">DeepL API Key
+      <input type="password" data-field="deeplKey" autocomplete="off" spellcheck="false" placeholder="以 :fx 结尾的免费版 Key">
+    </label>
+    <p class="hint">免费版每月约 50 万字符；Key 只保存在脚本管理器本地，不会发送到其他服务。</p>
+  </details>
   <details class="more">
     <summary>快捷键与维护</summary>
     <div class="grid2">
@@ -1839,7 +2068,7 @@ details.more[open] summary { margin-bottom: 8px; }
       <button class="mini-btn" type="button" data-action="reset-pos">重置按钮位置</button>
     </div>
   </details>
-  <p class="hint">自动顺序：微软 → MyMemory；Google 可手动选择。仅发送需要翻译的段落文本，不上传整页内容。免费网页接口没有长期可用承诺。</p>
+  <p class="hint">自动顺序：微软 → DeepL（配置 Key 后）→ Google。MyMemory 默认不参与自动兜底。仅发送需要翻译的文本，不上传整页内容。</p>
 </section>
 <button class="sel-btn" type="button" hidden aria-label="翻译选中文字">译</button>
 <div class="sel-card" role="dialog" aria-label="划词翻译" hidden>
@@ -1871,6 +2100,10 @@ details.more[open] summary { margin-bottom: 8px; }
       provider: shadow.querySelector('[data-field="provider"]'),
       target: shadow.querySelector('[data-field="target"]'),
       autoFallback: shadow.querySelector('[data-field="autoFallback"]'),
+      allowLowQuality: shadow.querySelector('[data-field="allowLowQuality"]'),
+      fullPage: shadow.querySelector('[data-field="fullPage"]'),
+      deeplBox: shadow.querySelector('[data-role="deepl-box"]'),
+      deeplKey: shadow.querySelector('[data-field="deeplKey"]'),
       selection: shadow.querySelector('[data-field="selection"]'),
       siteAuto: shadow.querySelector('[data-field="siteAuto"]'),
       siteDisabled: shadow.querySelector('[data-field="siteDisabled"]'),
@@ -1907,13 +2140,18 @@ details.more[open] summary { margin-bottom: 8px; }
 
     ui.provider.addEventListener('change', () => {
       const value = ui.provider.value;
-      if (!['auto', 'microsoft', 'mymemory', 'google'].includes(value)) return;
+      if (!['auto', 'microsoft', 'deepl', 'google', 'mymemory'].includes(value)) return;
       settings.provider = value;
       saveSettings();
-      reportStatus({
-        kind: session.active ? 'working' : 'idle',
-        message: value === 'auto' ? '已切换为自动选择接口' : `已切换接口：${providerLabel(value)}`,
-      });
+      if (value === 'deepl' && !settings.deeplKey) {
+        ui.deeplBox.open = true;
+        reportStatus({ kind: 'error', message: '请先填写 DeepL API Key；未填写时会回退到其他允许的接口' });
+      } else {
+        reportStatus({
+          kind: session.active ? 'working' : 'idle',
+          message: value === 'auto' ? '已切换为自动选择接口' : `已切换接口：${providerLabel(value)}`,
+        });
+      }
       syncUi();
     });
 
@@ -1941,6 +2179,36 @@ details.more[open] summary { margin-bottom: 8px; }
       });
       syncUi();
     });
+
+    ui.allowLowQuality.addEventListener('change', () => {
+      settings.allowLowQuality = ui.allowLowQuality.checked;
+      saveSettings();
+      reportStatus({
+        kind: 'idle',
+        message: settings.allowLowQuality
+          ? '已允许 MyMemory 低质量兜底'
+          : '已关闭 MyMemory 自动兜底，质量优先',
+      });
+      syncUi();
+    });
+
+    ui.fullPage.addEventListener('change', () => {
+      settings.fullPage = ui.fullPage.checked;
+      saveSettings();
+      if (session.active) {
+        reportStatus({ kind: 'working', message: '覆盖范围已更改，正在重新扫描页面…' });
+        restartTranslation();
+      } else {
+        reportStatus({
+          kind: 'idle',
+          message: settings.fullPage ? '已开启全页模式' : '已恢复正文模式',
+        });
+        syncUi();
+      }
+    });
+
+    ui.deeplKey.addEventListener('change', applyDeepLKey);
+    ui.deeplKey.addEventListener('blur', applyDeepLKey);
 
     ui.selection.addEventListener('change', () => {
       settings.selection = ui.selection.checked;
@@ -2040,6 +2308,9 @@ details.more[open] summary { margin-bottom: 8px; }
     ui.provider.value = settings.provider;
     ui.target.value = settings.targetLang;
     ui.autoFallback.checked = settings.autoFallback;
+    ui.allowLowQuality.checked = settings.allowLowQuality;
+    ui.fullPage.checked = settings.fullPage;
+    ui.deeplKey.value = settings.deeplKey;
     ui.selection.checked = settings.selection;
     const site = getSiteSettings();
     ui.siteAuto.checked = !!site.auto;
@@ -2202,6 +2473,23 @@ details.more[open] summary { margin-bottom: 8px; }
     } else {
       togglePanel();
     }
+  }
+
+  function applyDeepLKey() {
+    if (!ui) return;
+    const value = ui.deeplKey.value.trim();
+    if (value === settings.deeplKey) return;
+    settings.deeplKey = value;
+    providerStates.deepl = createProviderState();
+    saveSettings();
+    reportStatus({
+      kind: value ? 'idle' : 'error',
+      message: value
+        ? 'DeepL Key 已保存，切换到 DeepL 即可使用'
+        : 'DeepL Key 已清除',
+    });
+    if (session.active) schedulePump(0);
+    syncUi();
   }
 
   function applyShortcutField(name) {
