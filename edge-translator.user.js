@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PageLingo — 双语网页翻译
 // @namespace    https://github.com/qinmuran0316/PageLingo
-// @version      0.3.0
+// @version      0.4.0
 // @description  PageLingo：用微软 / DeepL / Google / MyMemory 翻译网页，支持双语对照、仅译文、划词翻译和快捷键
 // @author       qinmuran0316
 // @license      MIT
@@ -34,15 +34,15 @@
   if (window.__EDGE_TRANSLATOR_LOADED__) return;
   window.__EDGE_TRANSLATOR_LOADED__ = true;
 
-  const VERSION = '0.3.0';
+  const VERSION = '0.4.0';
   const HOST_ID = 'et-translator-host';
   const STYLE_ID = 'et-page-style';
   const SETTINGS_KEY = 'et:settings:v1';
-  const REQUEST_TIMEOUT = 8000;
-  const PROVIDER_GAP = 800;
+  const REQUEST_TIMEOUT = 10000;
+  const PROVIDER_GAP = 400;
   const MAX_BLOCK_CHARS = 1800;
-  const MAX_BATCH_ITEMS = 8;
-  const MAX_BATCH_CHARS = 3000;
+  const MAX_BATCH_ITEMS = 32;
+  const MAX_BATCH_CHARS = 8000;
   const CACHE_MAX_ITEMS = 1000;
   const CACHE_MAX_BYTES = 2 * 1024 * 1024;
   const DEBUG = false;
@@ -120,6 +120,10 @@
   const TEXT_FLOW_TAGS = new Set([
     'P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'TD', 'TH', 'DD', 'DT',
     'BLOCKQUOTE', 'FIGCAPTION', 'CAPTION', 'LABEL',
+  ]);
+  const INLINE_ORIGIN_TAGS = new Set([
+    'A', 'SPAN', 'STRONG', 'B', 'EM', 'I', 'U', 'S', 'SMALL', 'MARK',
+    'ABBR', 'TIME', 'CITE', 'Q', 'DEL', 'INS', 'LABEL',
   ]);
   const INLINE_DISPLAYS = new Set([
     'inline',
@@ -1003,7 +1007,7 @@
   // ---------------------------------------------------------------------------
 
   const TEXT_SPACED_TAGS = new Set([
-    'A', 'P', 'DIV', 'SECTION', 'ARTICLE', 'MAIN', 'HEADER', 'FOOTER', 'NAV', 'ASIDE',
+    'A', 'SPAN', 'P', 'DIV', 'SECTION', 'ARTICLE', 'MAIN', 'HEADER', 'FOOTER', 'NAV', 'ASIDE',
     'UL', 'OL', 'LI', 'DL', 'DT', 'DD', 'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TD', 'TH',
     'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'FIGCAPTION', 'CAPTION', 'LABEL',
     'FORM', 'FIELDSET',
@@ -1192,6 +1196,19 @@
       if (!blockChildren.length) {
         if (isEligibleTextBlock(el)) found.add(el);
         return;
+      }
+
+      const layoutContainer = style.display.includes('flex') || style.display.includes('grid');
+      if (layoutContainer && blockChildren.length >= 2) {
+        const fragmentLengths = blockChildren.map((child) => normalizeText(child.textContent).length);
+        const allInlineFragments =
+          blockChildren.every((child) => INLINE_ORIGIN_TAGS.has(child.tagName)) &&
+          fragmentLengths.every((length) => length <= 120) &&
+          fragmentLengths.reduce((sum, length) => sum + length, 0) / fragmentLengths.length <= 40;
+        if (allInlineFragments) {
+          if (isEligibleTextBlock(el)) found.add(el);
+          return;
+        }
       }
 
       if (
@@ -1612,7 +1629,7 @@
 
     const supportsBatch = provider === 'microsoft' || provider === 'deepl';
     const maxTexts = supportsBatch ? MAX_BATCH_ITEMS : 1;
-    const maxJobs = supportsBatch ? 24 : 1;
+    const maxJobs = supportsBatch ? 64 : 1;
     const selected = [];
     const selectedSet = new Set();
     const texts = new Set();
