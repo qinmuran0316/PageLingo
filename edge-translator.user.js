@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PageLingo — 双语网页翻译
 // @namespace    https://github.com/qinmuran0316/PageLingo
-// @version      0.2.0
-// @description  PageLingo：用微软 / DeepL / Google / MyMemory 翻译网页，通用文本块识别、双语对照、划词翻译、快捷键
+// @version      0.3.0
+// @description  PageLingo：用微软 / DeepL / Google / MyMemory 翻译网页，支持双语对照、仅译文、划词翻译和快捷键
 // @author       qinmuran0316
 // @license      MIT
 // @homepageURL  https://github.com/qinmuran0316/PageLingo
@@ -34,7 +34,7 @@
   if (window.__EDGE_TRANSLATOR_LOADED__) return;
   window.__EDGE_TRANSLATOR_LOADED__ = true;
 
-  const VERSION = '0.2.0';
+  const VERSION = '0.3.0';
   const HOST_ID = 'et-translator-host';
   const STYLE_ID = 'et-page-style';
   const SETTINGS_KEY = 'et:settings:v1';
@@ -95,6 +95,7 @@
     '[translate="no"]',
     '.notranslate',
     '.et-translation',
+    '.et-source-hidden',
     '#' + HOST_ID,
     '[role="textbox"]',
     '[aria-hidden="true"]',
@@ -131,13 +132,14 @@
   ]);
 
   const DEFAULTS = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     provider: 'auto',
     targetLang: 'zh-CN',
     autoFallback: true,
     allowLowQuality: false,
     selection: true,
     fullPage: false,
+    translationOnly: false,
     deeplKey: '',
     shortcuts: { toggle: 'Alt+T', panel: 'Alt+O' },
     position: null,
@@ -430,11 +432,12 @@
     if (!['auto', 'microsoft', 'deepl', 'google', 'mymemory'].includes(merged.provider)) {
       merged.provider = base.provider;
     }
-    merged.schemaVersion = 2;
+    merged.schemaVersion = 3;
     merged.autoFallback = merged.autoFallback !== false;
     merged.selection = merged.selection !== false;
     merged.allowLowQuality = merged.allowLowQuality === true;
     merged.fullPage = merged.fullPage === true;
+    merged.translationOnly = merged.translationOnly === true;
     merged.deeplKey = typeof merged.deeplKey === 'string' ? merged.deeplKey.trim() : '';
     return merged;
   }
@@ -885,8 +888,29 @@
     lastRoute: '',
     failedElements: new Set(),
     translations: new Set(),
+    sourceWrappers: new Set(),
     stats: { total: 0, done: 0, failed: 0 },
   };
+
+  const MUTATION_OBSERVER_OPTIONS = {
+    childList: true,
+    subtree: true,
+    characterData: true,
+  };
+
+  function withMutationPaused(task) {
+    const shouldResume = !!(session.mo && session.active && document.body);
+    if (shouldResume) {
+      try { session.mo.disconnect(); } catch (err) { /* ignore */ }
+    }
+    try {
+      return task();
+    } finally {
+      if (shouldResume && session.mo && session.active && document.body) {
+        try { session.mo.observe(document.body, MUTATION_OBSERVER_OPTIONS); } catch (err) { /* ignore */ }
+      }
+    }
+  }
 
   let elementStates = new WeakMap();
   let observed = new WeakSet();
@@ -898,6 +922,8 @@
   function resetSessionState() {
     session.queue = [];
     session.failedElements = new Set();
+    session.translations = new Set();
+    session.sourceWrappers = new Set();
     session.stats = { total: 0, done: 0, failed: 0 };
     elementStates = new WeakMap();
     observed = new WeakSet();
@@ -908,17 +934,64 @@
     }
   }
 
+  function unwrapSourceWrapper(wrapper) {
+    if (!wrapper) return;
+    session.sourceWrappers.delete(wrapper);
+    if (!wrapper.parentNode) return;
+    withMutationPaused(() => {
+      const parent = wrapper.parentNode;
+      while (wrapper.firstChild) parent.insertBefore(wrapper.firstChild, wrapper);
+      wrapper.remove();
+    });
+  }
+
+  function wrapSourceContent(el) {
+    let wrapper = el.querySelector(':scope > .et-source-hidden');
+    if (wrapper) {
+      session.sourceWrappers.add(wrapper);
+      return wrapper;
+    }
+
+    wrapper = document.createElement('span');
+    wrapper.className = 'et-source-hidden';
+    wrapper.setAttribute('aria-hidden', 'true');
+    wrapper.style.setProperty('display', 'none', 'important');
+
+    withMutationPaused(() => {
+      for (const child of Array.from(el.childNodes)) {
+        if (
+          child.nodeType === 1 &&
+          (child.classList.contains('et-translation') || child.classList.contains('et-source-hidden'))
+        ) {
+          continue;
+        }
+        wrapper.appendChild(child);
+      }
+      el.appendChild(wrapper);
+    });
+    session.sourceWrappers.add(wrapper);
+    return wrapper;
+  }
+
   function removeTranslationNode(node) {
     if (!node) return;
+    if (node.__etSourceWrapper) {
+      unwrapSourceWrapper(node.__etSourceWrapper);
+      node.__etSourceWrapper = null;
+    }
     try { node.remove(); } catch (err) { /* ignore */ }
     session.translations.delete(node);
   }
 
   function removeAllTranslations() {
-    for (const node of session.translations) {
-      try { node.remove(); } catch (err) { /* ignore */ }
+    for (const node of Array.from(session.translations)) {
+      removeTranslationNode(node);
     }
     session.translations.clear();
+    for (const wrapper of Array.from(session.sourceWrappers)) {
+      unwrapSourceWrapper(wrapper);
+    }
+    session.sourceWrappers.clear();
     for (const el of Array.from(session.failedElements)) {
       const state = elementStates.get(el);
       if (state && state.translationEl) removeTranslationNode(state.translationEl);
@@ -1182,8 +1255,10 @@
     if (!node) return false;
     if (node.nodeType !== 1) return false;
     if (node.id === HOST_ID) return true;
-    if (node.classList && node.classList.contains('et-translation')) return true;
-    if (node.closest && node.closest('#' + HOST_ID + ',.et-translation')) return true;
+    if (node.classList && (node.classList.contains('et-translation') || node.classList.contains('et-source-hidden'))) {
+      return true;
+    }
+    if (node.closest && node.closest('#' + HOST_ID + ',.et-translation,.et-source-hidden')) return true;
     return false;
   }
 
@@ -1251,7 +1326,24 @@
     for (const record of records) {
       if (record.type === 'childList') {
         for (const node of record.addedNodes) {
-          if (node.nodeType !== 1 || isOwnNode(node)) continue;
+          const parentEl = node.nodeType === 1 ? node : node.parentElement;
+          if (!parentEl) continue;
+          if (parentEl.closest('.et-translation,#' + HOST_ID)) continue;
+
+          const sourceWrapper = parentEl.closest('.et-source-hidden');
+          if (sourceWrapper) {
+            const translatedEl = findStatefulAncestor(sourceWrapper.parentElement);
+            if (translatedEl) scheduleRecheck(translatedEl);
+            continue;
+          }
+
+          if (node.nodeType !== 1) {
+            const statefulParent = findStatefulAncestor(parentEl);
+            if (statefulParent) scheduleRecheck(statefulParent);
+            continue;
+          }
+
+          if (isOwnNode(node)) continue;
           pendingScanRoots.add(node);
           const parentCandidate = findStatefulAncestor(node.parentElement);
           if (parentCandidate) scheduleRecheck(parentCandidate);
@@ -1269,11 +1361,7 @@
   function ensureMutationObserver() {
     if (session.mo || !document.body || typeof MutationObserver !== 'function') return;
     session.mo = new MutationObserver(handleMutations);
-    session.mo.observe(document.body, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-    });
+    session.mo.observe(document.body, MUTATION_OBSERVER_OPTIONS);
   }
 
   function startUrlWatcher() {
@@ -1337,6 +1425,11 @@
     node.dir = 'auto';
     node.dataset.et = 'translation';
     node.dataset.state = 'loading';
+    node.dataset.mode = settings.translationOnly ? 'only' : 'bilingual';
+
+    if (settings.translationOnly) {
+      node.__etSourceWrapper = wrapSourceContent(el);
+    }
 
     const style = getComputedStyle(el);
     const parent = el.parentElement;
@@ -1758,6 +1851,7 @@
     const style = document.createElement('style');
     style.id = STYLE_ID;
     style.textContent = `
+.et-source-hidden { display: none !important; }
 .et-translation {
   display: block !important;
   margin: .35em 0 .55em !important;
@@ -1777,6 +1871,25 @@ h1 > .et-translation { font-size: .52em !important; font-weight: 500 !important;
 h2 > .et-translation { font-size: .6em !important; font-weight: 500 !important; }
 h3 > .et-translation { font-size: .7em !important; font-weight: 500 !important; }
 h4 > .et-translation, h5 > .et-translation, h6 > .et-translation { font-size: .82em !important; font-weight: 500 !important; }
+.et-translation[data-mode="only"] {
+  margin: 0 !important;
+  padding: 0 !important;
+  border-left: 0 !important;
+  font-size: inherit !important;
+  line-height: inherit !important;
+  text-align: inherit !important;
+  opacity: 1 !important;
+}
+h1 > .et-translation[data-mode="only"],
+h2 > .et-translation[data-mode="only"],
+h3 > .et-translation[data-mode="only"],
+h4 > .et-translation[data-mode="only"],
+h5 > .et-translation[data-mode="only"],
+h6 > .et-translation[data-mode="only"] {
+  font-size: inherit !important;
+  font-weight: inherit !important;
+  line-height: inherit !important;
+}
 @media (prefers-color-scheme: dark) {
   .et-translation { border-left-color: rgba(110,160,255,.7) !important; }
 }
@@ -2043,6 +2156,7 @@ details.more[open] summary { margin-bottom: 8px; }
     <label class="check"><input type="checkbox" data-field="autoFallback">接口失败时自动回退</label>
     <label class="check"><input type="checkbox" data-field="allowLowQuality">允许 MyMemory 低质量兜底</label>
     <label class="check"><input type="checkbox" data-field="fullPage">全页模式（含导航/侧栏，实验）</label>
+    <label class="check"><input type="checkbox" data-field="translationOnly">仅显示译文（隐藏原文）</label>
     <label class="check"><input type="checkbox" data-field="selection">划词翻译</label>
     <label class="check"><input type="checkbox" data-field="siteAuto">本网站自动翻译</label>
     <label class="check"><input type="checkbox" data-field="siteDisabled">禁用本网站</label>
@@ -2104,6 +2218,7 @@ details.more[open] summary { margin-bottom: 8px; }
       autoFallback: shadow.querySelector('[data-field="autoFallback"]'),
       allowLowQuality: shadow.querySelector('[data-field="allowLowQuality"]'),
       fullPage: shadow.querySelector('[data-field="fullPage"]'),
+      translationOnly: shadow.querySelector('[data-field="translationOnly"]'),
       deeplBox: shadow.querySelector('[data-role="deepl-box"]'),
       deeplKey: shadow.querySelector('[data-field="deeplKey"]'),
       selection: shadow.querySelector('[data-field="selection"]'),
@@ -2204,6 +2319,26 @@ details.more[open] summary { margin-bottom: 8px; }
         reportStatus({
           kind: 'idle',
           message: settings.fullPage ? '已开启全页模式' : '已恢复正文模式',
+        });
+        syncUi();
+      }
+    });
+
+    ui.translationOnly.addEventListener('change', () => {
+      settings.translationOnly = ui.translationOnly.checked;
+      saveSettings();
+      if (session.active) {
+        reportStatus({
+          kind: 'working',
+          message: settings.translationOnly
+            ? '已切换为仅译文模式，正在隐藏原文…'
+            : '已切换为双语模式，正在恢复原文…',
+        });
+        restartTranslation();
+      } else {
+        reportStatus({
+          kind: 'idle',
+          message: settings.translationOnly ? '已开启仅译文模式' : '已切换为双语模式',
         });
         syncUi();
       }
@@ -2312,6 +2447,7 @@ details.more[open] summary { margin-bottom: 8px; }
     ui.autoFallback.checked = settings.autoFallback;
     ui.allowLowQuality.checked = settings.allowLowQuality;
     ui.fullPage.checked = settings.fullPage;
+    ui.translationOnly.checked = settings.translationOnly;
     ui.deeplKey.value = settings.deeplKey;
     ui.selection.checked = settings.selection;
     const site = getSiteSettings();

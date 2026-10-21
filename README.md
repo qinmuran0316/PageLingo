@@ -2,7 +2,7 @@
 
 **让网页以两种语言展开。 / Read the web in two languages.**
 
-`v0.2.0` · 单文件用户脚本 · Tampermonkey / ScriptCat
+`v0.3.0` · 单文件用户脚本 · Tampermonkey / ScriptCat
 
 [简体中文](#简体中文) · [English](#english)
 
@@ -14,9 +14,16 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 
 点击页面边缘的「译」按钮，即可在原文下方显示中文译文；再次点击恢复原文。脚本会尽量保留原有的链接、排版和页面交互。
 
-当前版本：`0.2.0`。直接查看安装文件：[edge-translator.user.js](edge-translator.user.js)。
+当前版本：`0.3.0`。直接查看安装文件：[edge-translator.user.js](edge-translator.user.js)。
 
 > 从 v0.1 升级：v0.2 的脚本名称和 `@namespace` 已改为 PageLingo。安装前请先在 Tampermonkey / ScriptCat 中禁用或删除旧的「双语网页翻译（Edge）」脚本，避免管理器里保留两份。v0.2 已加入 `@updateURL`，之后可在脚本管理器中检查更新。
+
+### v0.3.0 新增：仅译文模式
+
+- 在面板勾选「仅显示译文（隐藏原文）」，页面会隐藏原英文，只显示译文，更接近沉浸式翻译的“仅译文”阅读方式。
+- 原文节点、链接和目标地址仍保留在页面中，只是暂时隐藏；取消勾选或点击「恢复原文」会完整还原。
+- 翻译语言、接口、全页模式和「仅译文」可以随时组合切换；切换时会复用缓存，不重复请求。
+- 正文块内的图片、链接和交互内容会随原文一起隐藏，这是替换式阅读的取舍；需要点击正文链接时请切回双语模式。
 
 ### v0.2.0 主要更新
 
@@ -47,6 +54,7 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 | 点击「译」 | 翻译当前屏幕附近的内容，滚动后继续翻译 |
 | 再次点击「译」 | 恢复原文，只删除脚本插入的译文节点 |
 | 点击按钮打开面板 | 选择接口、目标语言、站点自动翻译、禁用网站等 |
+| 勾选「仅显示译文」 | 隐藏原文，只显示译文；取消勾选恢复双语 |
 | 选中文字 | 出现小「译」按钮，点击后翻译选中内容，可复制结果 |
 | `Alt+T` | 翻译 / 恢复当前页面 |
 | `Alt+O` | 打开设置面板 |
@@ -90,6 +98,7 @@ Key 只保存在脚本管理器本地存储中，只会发送给 DeepL 官方端
 - **错误处理**：网络错误/5xx 重试一次；429 尊重 `Retry-After` 并冷却；401/403、协议异常会暂停对应接口；连续失败自动熔断；DeepL 额度用尽（HTTP 456）暂停 1 小时。
 - **质量优先**：默认自动回退不包含 MyMemory；低质量兜底必须由用户显式开启。
 - **排版保护**：flex / grid 容器中的译文换到独立行；相邻链接和块边界会补空格后再送入翻译，避免 `HomeDocsAbout` 这类拼接错误。
+- **可逆的仅译文模式**：原文被放进临时隐藏容器而不是删除；恢复原文、切换模式或重译时会解包并还原原始节点，避免留下空页面或重复 DOM。
 - **缓存与去重**：内存 LRU 缓存最多约 1000 条或 2 MiB；相同原文不会重复请求；缓存按目标语言隔离。
 - **页面安全**：原文节点保持原位，只追加纯文本译文节点；译文只通过 `textContent` 写入，避免把接口内容当 HTML 执行。
 - **动态页面**：`MutationObserver` 合并新增内容后增量扫描；SPA 路由变化时取消旧任务并重新扫描；渲染前校验任务代次、节点连接状态和原文指纹，防止旧译文贴到新内容。
@@ -101,6 +110,7 @@ Key 只保存在脚本管理器本地存储中，只会发送给 DeepL 官方端
 - 只发送当前需要翻译的文本，不上传整页 HTML、页面地址、账号信息或 Cookie。
 - 密码框、输入框、可编辑区域和代码块不会自动进入翻译队列。
 - DeepL Key 只保存在脚本管理器存储中，不写入网页存储，不进入日志。
+- 仅译文模式只是在本地隐藏原文 DOM，不会删除或上传原文。
 - 译文缓存只保存在当前页面内存中，刷新即清空；设置保存在脚本管理器本地存储。
 - 脚本没有统计、上报或远程配置功能。
 
@@ -112,6 +122,7 @@ Key 只保存在脚本管理器本地存储中，只会发送给 DeepL 官方端
 - 免费接口可能限流、变更或在特定网络不可达；Google 在当前网络环境测试时连接超时，自动回退到它时可能等待超时。
 - DeepL 需要用户自己的 API Key；脚本不会创建或升级 DeepL 付费账户。
 - 全页模式、大型单页应用、虚拟列表和频繁改写的页面可能需要站点级排除规则；当前版本没有图形化的站点规则编辑器。
+- 仅译文模式会隐藏原文块内的链接和图片；需要点击正文链接或查看图片时请切回双语模式。少数依赖直接子节点的网页脚本可能在隐藏/恢复期间表现异常。
 - 多标签页同时翻译时，各标签页独立限流；不会造成单页请求风暴，但不是全局配额管理。
 
 ### 验证记录
@@ -131,11 +142,17 @@ Key 只保存在脚本管理器本地存储中，只会发送给 DeepL 官方端
   - DeepL 模拟接口验证了请求体、批量响应解析和状态显示；
   - 微软/Google 都失败时不调用 MyMemory，勾选低质量兜底后才回退；
   - 2000 个文本块首次扫描约 60ms（本机 headless 环境）。
+- **仅译文模式（v0.3）**：
+  - 原文容器计算样式为 `display: none`，链接不可见；5 个译文块对应 5 个隐藏原文容器；
+  - 恢复原文后隐藏容器和译文节点均为 0，原链接、`href` 和段落文本完整还原；
+  - 双语 ↔ 仅译文来回切换时，隐藏容器正确创建/解包，不重复请求；
+  - 隐藏原文中的文字发生变化后，译文会自动重新翻译；
+  - 标题保持原字号，表格/列表/代码块布局正常，控制台无报错。
 - 尚未在真实 Tampermonkey / ScriptCat 扩展中完成安装、权限和升级验收，也尚未用真实 DeepL Key 调用；这是发布前剩余的人工测试。
 
 ### 实现说明
 
-为了安装和分发简单，v0.2.0 使用单个 `.user.js` 文件，不依赖构建工具。文件内按“设置 / 请求 / 接口适配 / 提取 / 调度 / 渲染 / 界面”分段组织，后续如果继续扩展站点规则或接口，可以再拆分源码和构建流程。
+为了安装和分发简单，v0.3.0 使用单个 `.user.js` 文件，不依赖构建工具。文件内按“设置 / 请求 / 接口适配 / 提取 / 调度 / 渲染 / 界面”分段组织，后续如果继续扩展站点规则或接口，可以再拆分源码和构建流程。
 
 接口协议和页面处理的思路参考了以下公开项目，代码为本项目独立实现：
 
@@ -152,9 +169,16 @@ PageLingo (Bilingual Web Page Translation) is a single-file userscript for Micro
 
 Click the **译** button at the edge of a page to add Chinese translations below the original text. Click it again to restore the original page. PageLingo preserves links, layout, and page interactions as much as possible.
 
-Current version: `0.2.0`. View the userscript file: [edge-translator.user.js](edge-translator.user.js).
+Current version: `0.3.0`. View the userscript file: [edge-translator.user.js](edge-translator.user.js).
 
 > Upgrading from v0.1: v0.2 changes both the script name and `@namespace` to PageLingo. Disable or remove the old **双语网页翻译（Edge）** script in Tampermonkey / ScriptCat before installing v0.2 so the manager does not keep two copies. v0.2 includes `@updateURL`, so later versions can be checked from the userscript manager.
+
+### New in 0.3.0: translation-only mode
+
+- Enable **Show translation only (hide original)** in the panel to hide the source text and read only the translation, closer to Immersive Translate's translation-only reading mode.
+- Original nodes, links, and hrefs remain in the page in a temporary hidden container. Unchecking the option or clicking **Restore original** brings them back completely.
+- Target language, provider, full-page mode, and translation-only mode can be combined. Switching modes reuses the cache and does not duplicate requests.
+- Images, links, and interactive content inside a translated block are hidden with the source. Switch back to bilingual mode when you need to click inline links.
 
 ### What's new in 0.2.0
 
@@ -185,6 +209,7 @@ After installation, a blue **译** button appears in the bottom-right corner of 
 | Click **译** | Translate content near the current viewport and continue as you scroll |
 | Click **译** again | Restore the original page by removing only the translation nodes added by the script |
 | Open the panel from the button | Choose a provider, target language, site-level auto-translation, or disable the site |
+| Enable **Show translation only** | Hide the original and show only the translation; disable it to return to bilingual mode |
 | Select text | A small **译** button appears; click it to translate the selection and copy the result |
 | `Alt+T` | Translate / restore the current page |
 | `Alt+O` | Open the settings panel |
@@ -228,6 +253,7 @@ The key is stored only in the userscript manager's local storage and is sent onl
 - **Error handling**: retry network errors and 5xx once; honor `Retry-After` on 429 and cool down; pause a provider after 401/403 or protocol errors; trip a circuit breaker after repeated failures; cool down for one hour when the DeepL quota is exhausted (HTTP 456).
 - **Quality first**: MyMemory is excluded from automatic fallback unless the user enables low-quality fallback explicitly.
 - **Layout protection**: translations inside flex/grid containers move to a separate row; spaces are inserted at link and block boundaries before translation to avoid `HomeDocsAbout`-style input errors.
+- **Reversible translation-only mode**: source content is moved into a temporary hidden container, not deleted. Restoring, switching modes, or retranslating unwraps the original nodes so the page is not left blank or with duplicate DOM.
 - **Cache and deduplication**: an in-memory LRU cache holds about 1,000 entries or 2 MiB; identical source text is not requested twice; cache keys are isolated by target language.
 - **Page safety**: original nodes stay in place; only plain-text translation nodes are appended; translations are written with `textContent` only, so provider output is never executed as HTML.
 - **Dynamic pages**: `MutationObserver` batches new content for incremental scanning; SPA route changes cancel old jobs and trigger a rescan; generation, node connectivity, and source fingerprints are checked before rendering so stale translations do not attach to new content.
@@ -239,6 +265,7 @@ The key is stored only in the userscript manager's local storage and is sent onl
 - Only the text that needs translation is sent. Full-page HTML, page URLs, account information, and cookies are not uploaded.
 - Password fields, input fields, editable areas, and code blocks do not enter the translation queue automatically.
 - A DeepL key is stored only in the userscript manager's storage, not in page storage or logs.
+- Translation-only mode hides source DOM locally; it does not delete or upload the original content.
 - Translation cache lives only in page memory and is cleared on refresh. Settings are stored in the userscript manager's local storage.
 - The script contains no analytics, reporting, or remote configuration.
 
@@ -250,6 +277,7 @@ The key is stored only in the userscript manager's local storage and is sent onl
 - Free providers may rate-limit, change, or become unreachable on some networks. Google timed out in the current test environment, so automatic fallback to Google may wait for a timeout.
 - DeepL requires your own API key; PageLingo does not create or upgrade paid DeepL accounts.
 - Full-page mode, large single-page apps, virtualized lists, and frequently rewritten pages may need site-level exclusion rules. There is no graphical site-rule editor in the current version.
+- Translation-only mode hides links and images inside a translated block. Switch back to bilingual mode when you need to click inline links or view images. A few sites whose scripts depend on direct child nodes may behave unexpectedly while content is hidden or restored.
 - When several tabs translate at once, each tab rate-limits independently. This avoids request storms within one page, but is not a global quota manager.
 
 ### Verification notes
@@ -269,11 +297,17 @@ Checks performed locally on 2026-10-22:
   - DeepL request/response handling and provider status were verified against a simulated endpoint;
   - When Microsoft and Google both failed, MyMemory was not called; it was used only after low-quality fallback was enabled;
   - First scan of 2,000 text blocks took about 60ms in the local headless environment.
+- **Translation-only mode (v0.3)**:
+  - Source containers computed to `display: none` and links became invisible; five translated blocks produced five hidden source containers;
+  - After restore, hidden containers and translation nodes both dropped to zero, and the original link, `href`, and paragraph text were intact;
+  - Switching between bilingual and translation-only modes created and unwrapped hidden containers correctly without duplicate requests;
+  - Editing text inside a hidden source container triggered retranslation;
+  - Heading size was preserved, and table/list/code layout remained normal with no console errors.
 - Installation, permission, and upgrade acceptance in real Tampermonkey / ScriptCat extensions is still pending, and DeepL has not been tested with a real key. These remain the required manual tests before release.
 
 ### Implementation notes
 
-To keep installation and distribution simple, v0.2.0 is a single `.user.js` file with no build step. The file is organized into settings, requests, provider adapters, extraction, scheduling, rendering, and UI sections. If site rules or providers grow, the source and build process can be split later.
+To keep installation and distribution simple, v0.3.0 is a single `.user.js` file with no build step. The file is organized into settings, requests, provider adapters, extraction, scheduling, rendering, and UI sections. If site rules or providers grow, the source and build process can be split later.
 
 The protocol and page-processing approach were informed by the following open-source projects. The implementation here is independent:
 
