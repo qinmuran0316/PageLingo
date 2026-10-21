@@ -2,7 +2,7 @@
 
 **让网页以两种语言展开。 / Read the web in two languages.**
 
-`v0.4.0` · 单文件用户脚本 · Tampermonkey / ScriptCat
+`v0.5.0` · 单文件用户脚本 · Tampermonkey / ScriptCat
 
 [简体中文](#简体中文) · [English](#english)
 
@@ -14,16 +14,19 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 
 点击页面边缘的「译」按钮，即可在原文下方显示中文译文；再次点击恢复原文。脚本会尽量保留原有的链接、排版和页面交互。
 
-当前版本：`0.4.0`。直接查看安装文件：[edge-translator.user.js](edge-translator.user.js)。
+当前版本：`0.5.0`。直接查看安装文件：[edge-translator.user.js](edge-translator.user.js)。
 
 > 从 v0.1 升级：v0.2 的脚本名称和 `@namespace` 已改为 PageLingo。安装前请先在 Tampermonkey / ScriptCat 中禁用或删除旧的「双语网页翻译（Edge）」脚本，避免管理器里保留两份。v0.2 已加入 `@updateURL`，之后可在脚本管理器中检查更新。
 
-### v0.4.0 速度优化
+### v0.5.0 速度、稳定性与安全优化
 
-- **整屏批量翻译**：微软/DeepL 单批从 8 段提升到最多 32 段、约 8000 字符，请求间隔从 800ms 降到 400ms，单次超时提高到 10 秒。
-- **减少请求数**：同屏 26 个文本块实测只发出 1 个请求；真实微软接口一次 32 段/7159 字符约 0.8 秒返回。
-- **合并逐词碎片**：flex/grid 布局中按词拆开的短 `span` 不再逐个翻译，而是合并成完整句子/短语后一次翻译，既减少请求也保留上下文。
-- **更快看到整屏译文**：同一批返回的译文会一起渲染，不再一块一块地慢慢出现。
+- **并发翻译**：页面最多同时处理 2 个翻译批次；微软和 DeepL 使用独立请求队列，同一接口启动间隔降到约 250ms，划词翻译拥有更高优先级。
+- **更快覆盖全页**：全页模式直接进入翻译队列，不再等待滚动触发；长页面扫描按约 6ms 分片让出主线程，避免页面卡顿。
+- **批量与去重**：微软/DeepL 单批最多 32 段、约 8000 字符；重复文本在同一批次合并，Google 分段请求也支持并发处理。
+- **批量渲染**：一个批次完成后统一更新译文节点，减少反复布局和重绘。
+- **速度实测**：本机 headless Edge、120 个段落、每个模拟请求 60ms 时，v0.4.0 约 1354ms，v0.5.0 约 837ms，约提升 1.62 倍；真实网络速度仍取决于接口和网络。
+- **统一取消**：停止翻译、切换语言、切换页面时会取消在途请求、退避等待和未开始队列，避免旧任务继续占用接口。
+- **安全与缓存**：DeepL 仅允许 `:fx` 免费 Key 和免费端点；设置面板改为 closed Shadow DOM，已保存 Key 不回填网页输入框；缓存按来源、接口、语言、回退设置和协议版本隔离。
 
 ### v0.3.0 新增：仅译文模式
 
@@ -48,7 +51,7 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 3. 打开 [edge-translator.user.js](edge-translator.user.js)，点击 **Raw**，由脚本管理器接管安装；也可以新建脚本，把全部内容粘贴进去后保存。
 4. 打开任意网页，第一次翻译时脚本管理器会请求跨域权限，请允许：
    - `edge.microsoft.com`（默认免费接口）
-   - `api-free.deepl.com` / `api.deepl.com`（配置 DeepL 时）
+   - `api-free.deepl.com`（配置 DeepL 免费 Key 时）
    - `translate.googleapis.com`（自动回退或手动选择 Google 时）
    - `api.mymemory.translated.net`（启用低质量兜底时）
 
@@ -100,7 +103,9 @@ Key 只保存在脚本管理器本地存储中，只会发送给 DeepL 官方端
 
 - **通用文本块识别**：根据实际布局寻找叶子文本块，覆盖 `div`、`span`、`section` 和自定义元素；跳过 `pre`、`code`、按钮、表单控件、密码框、`contenteditable`、`translate="no"`、导航和页脚。需要时可在面板开启全页模式。
 - **可见区域优先**：使用 `IntersectionObserver`，先翻译视口上下约 700px 的内容，滚动后再继续。
-- **批量与限速**：微软/DeepL 每批最多 32 段、约 8000 字符合并；同接口两次请求至少间隔 400ms；单个请求 10 秒超时。
+- **批量与限速**：微软/DeepL 每批最多 32 段、约 8000 字符合并；页面最多并发 2 个批次，同接口两次请求初始至少间隔 250ms；单个请求 10 秒超时，429 后自动冷却。
+- **划词优先**：划词请求会在接口队列中优先于普通页面批次，减少手动翻译等待。
+- **可中断扫描**：候选文本按约 6ms 的协作分片扫描；全页模式直接排队，滚动模式仍优先处理视口附近内容。
 - **尝试预算**：同一批次最多 3 次接口尝试，包含重试和接口回退；长文本按接口能力分片时，分片请求不计入额外尝试，但受相同的接口间隔和超时约束。
 - **错误处理**：网络错误/5xx 重试一次；429 尊重 `Retry-After` 并冷却；401/403、协议异常会暂停对应接口；连续失败自动熔断；DeepL 额度用尽（HTTP 456）暂停 1 小时。
 - **质量优先**：默认自动回退不包含 MyMemory；低质量兜底必须由用户显式开启。
@@ -112,12 +117,15 @@ Key 只保存在脚本管理器本地存储中，只会发送给 DeepL 官方端
 - **动态页面**：`MutationObserver` 合并新增内容后增量扫描；SPA 路由变化时取消旧任务并重新扫描；渲染前校验任务代次、节点连接状态和原文指纹，防止旧译文贴到新内容。
 - **内容变化保护**：同一段内容在 30 秒内频繁变化超过 3 次时暂停自动重译，避免与实时更新页面互相拉扯。
 - **后台标签**：页面不可见时暂停新的请求，回到前台后继续。
+- **统一取消**：停止、路由切换和语言切换会取消请求、重试退避、接口队列等待和旧批次，防止恢复原文后继续发请求。
+- **接口隔离缓存**：缓存记录实际翻译接口，并隔离目标语言、接口选择、自动回退、DeepL Key 指纹和协议版本。
+- **凭据保护**：只接受 DeepL `:fx` Key；已保存 Key 不回填输入框，设置 UI 使用 closed Shadow DOM，网页脚本不能通过 `host.shadowRoot` 读取面板内容。
 
 ### 隐私
 
 - 只发送当前需要翻译的文本，不上传整页 HTML、页面地址、账号信息或 Cookie。
 - 密码框、输入框、可编辑区域和代码块不会自动进入翻译队列。
-- DeepL Key 只保存在脚本管理器存储中，不写入网页存储，不进入日志。
+- DeepL Key 只保存在脚本管理器存储中，不写入网页存储，不进入日志；输入框不会回填已保存 Key，设置面板使用 closed Shadow DOM。
 - 仅译文模式只是在本地隐藏原文 DOM，不会删除或上传原文。
 - 译文缓存只保存在当前页面内存中，刷新即清空；设置保存在脚本管理器本地存储。
 - 脚本没有统计、上报或远程配置功能。
@@ -156,15 +164,19 @@ Key 只保存在脚本管理器本地存储中，只会发送给 DeepL 官方端
   - 双语 ↔ 仅译文来回切换时，隐藏容器正确创建/解包，不重复请求；
   - 隐藏原文中的文字发生变化后，译文会自动重新翻译；
   - 标题保持原字号，表格/列表/代码块布局正常，控制台无报错。
-- **整屏速度（v0.4）**：
+- **整屏速度（v0.5）**：
   - 24 个段落 + 8 个 flex 词碎片（合并为 1 个单元）共 26 段，只发出 1 个请求；
-  - 真实微软接口 32 段、7159 字符单批返回 HTTP 200，约 789ms；
+  - 120 个段落的模拟批量测试从 v0.4.0 的约 1354ms 降到 v0.5.0 的约 837ms，约提升 1.62 倍；
+  - 1000 个候选段落扫描约 18ms，10000 个约 164ms；扫描采用协作分片，不把长任务连续占满主线程；
   - 整批译文一起渲染，双语/仅译文切换和恢复仍正常，无残留节点。
+- **v0.5.0 回归测试**：
+  - 18 个场景中 15 个正常行为通过，0 个失败，2 个性能观察项，0 个测试工具错误；
+  - 覆盖取消在途请求、取消重试退避、动态新增/删除内容、缓存接口隔离、法语到英语、繁体到简体、CSS 隐藏节点过滤、频繁更新保护和 closed Shadow DOM Key 隔离。
 - 尚未在真实 Tampermonkey / ScriptCat 扩展中完成安装、权限和升级验收，也尚未用真实 DeepL Key 调用；这是发布前剩余的人工测试。
 
 ### 实现说明
 
-为了安装和分发简单，v0.4.0 使用单个 `.user.js` 文件，不依赖构建工具。文件内按“设置 / 请求 / 接口适配 / 提取 / 调度 / 渲染 / 界面”分段组织，后续如果继续扩展站点规则或接口，可以再拆分源码和构建流程。
+为了安装和分发简单，v0.5.0 使用单个 `.user.js` 文件，不依赖构建工具。文件内按“设置 / 请求 / 接口适配 / 提取 / 调度 / 渲染 / 界面”分段组织，后续如果继续扩展站点规则或接口，可以再拆分源码和构建流程。
 
 接口协议和页面处理的思路参考了以下公开项目，代码为本项目独立实现：
 
@@ -181,16 +193,19 @@ PageLingo (Bilingual Web Page Translation) is a single-file userscript for Micro
 
 Click the **译** button at the edge of a page to add Chinese translations below the original text. Click it again to restore the original page. PageLingo preserves links, layout, and page interactions as much as possible.
 
-Current version: `0.4.0`. View the userscript file: [edge-translator.user.js](edge-translator.user.js).
+Current version: `0.5.0`. View the userscript file: [edge-translator.user.js](edge-translator.user.js).
 
 > Upgrading from v0.1: v0.2 changes both the script name and `@namespace` to PageLingo. Disable or remove the old **双语网页翻译（Edge）** script in Tampermonkey / ScriptCat before installing v0.2 so the manager does not keep two copies. v0.2 includes `@updateURL`, so later versions can be checked from the userscript manager.
 
-### New in 0.4.0: whole-screen speed
+### New in 0.5.0: speed, stability, and safety
 
-- **Whole-screen batching**: Microsoft/DeepL now accepts up to 32 segments or about 8,000 characters per request (up from 8/3,000); request spacing drops from 800ms to 400ms and the request timeout rises to 10 seconds.
-- **Fewer requests**: a 26-segment screen took one request in testing. A real Microsoft request with 32 segments and 7,159 characters returned in about 0.8 seconds.
-- **Word-fragment coalescing**: short `span` tokens split across a flex/grid layout are merged into a full sentence or phrase before translation. This reduces requests and preserves context instead of translating word by word.
-- **Whole batches appear together**: all translations from one batch render as one group instead of trickling in block by block.
+- **Concurrent translation**: up to two page batches run at once. Microsoft and DeepL use independent request lanes with an initial 250ms start gap, and selection translation has higher priority.
+- **Faster full-page coverage**: full-page mode queues all discovered candidates directly instead of waiting for scrolling. Long scans yield every roughly 6ms so the page remains responsive.
+- **Batching and deduplication**: Microsoft/DeepL handle up to 32 segments or about 8,000 characters per batch; duplicate text is merged and Google segments are processed concurrently.
+- **Batch rendering**: results from one batch update together to reduce repeated layout and repaint work.
+- **Measured speedup**: in headless Edge with 120 paragraphs and a simulated 60ms request, v0.4.0 took about 1,354ms and v0.5.0 about 837ms, a 1.62x improvement. Real network speed depends on the provider and connection.
+- **Unified cancellation**: stopping, changing language, or changing routes cancels in-flight requests, backoff waits, and queued work.
+- **Safer credentials and cache**: DeepL accepts only `:fx` free keys and the free endpoint; the settings UI uses a closed Shadow DOM and never refills a saved key into the page input; cache entries are isolated by origin, provider, language, fallback settings, and protocol version.
 
 ### New in 0.3.0: translation-only mode
 
@@ -215,7 +230,7 @@ Current version: `0.4.0`. View the userscript file: [edge-translator.user.js](ed
 3. Open [edge-translator.user.js](edge-translator.user.js) and click **Raw** to let your userscript manager install it. Alternatively, create a new script and paste the full file contents into it.
 4. On the first translation, your userscript manager will ask for cross-origin permissions. Allow:
    - `edge.microsoft.com` (default keyless provider)
-   - `api-free.deepl.com` / `api.deepl.com` (when DeepL is configured)
+   - `api-free.deepl.com` (when a DeepL Free key is configured)
    - `translate.googleapis.com` (automatic fallback or manual Google)
    - `api.mymemory.translated.net` (when low-quality fallback is enabled)
 
@@ -267,7 +282,9 @@ The key is stored only in the userscript manager's local storage and is sent onl
 
 - **Generic block detection**: find leaf text blocks from rendered layout, covering `div`, `span`, `section`, and custom elements; skip `pre`, `code`, buttons, form controls, password fields, `contenteditable`, `translate="no"`, navigation, and footers. Full-page mode can include page chrome when needed.
 - **Viewport first**: use `IntersectionObserver` to translate content within roughly 700px above and below the viewport, then continue on scroll.
-- **Batching and rate limiting**: Microsoft/DeepL batches up to 32 segments and about 8,000 characters; consecutive requests to the same provider are at least 400ms apart; each request times out after 10 seconds.
+- **Batching and rate limiting**: Microsoft/DeepL batches up to 32 segments and about 8,000 characters; up to two page batches run concurrently, same-provider starts initially stay at least 250ms apart, and each request times out after 10 seconds.
+- **Selection priority**: selection requests move ahead of ordinary page batches in a provider queue.
+- **Cooperative scanning**: candidate discovery yields about every 6ms; full-page mode queues candidates directly while viewport mode still prioritizes content near the viewport.
 - **Attempt budget**: each batch gets at most 3 provider attempts, including retries and fallback. Requests split from a long text do not count as additional attempts, but follow the same request interval and timeout rules.
 - **Error handling**: retry network errors and 5xx once; honor `Retry-After` on 429 and cool down; pause a provider after 401/403 or protocol errors; trip a circuit breaker after repeated failures; cool down for one hour when the DeepL quota is exhausted (HTTP 456).
 - **Quality first**: MyMemory is excluded from automatic fallback unless the user enables low-quality fallback explicitly.
@@ -279,12 +296,15 @@ The key is stored only in the userscript manager's local storage and is sent onl
 - **Dynamic pages**: `MutationObserver` batches new content for incremental scanning; SPA route changes cancel old jobs and trigger a rescan; generation, node connectivity, and source fingerprints are checked before rendering so stale translations do not attach to new content.
 - **Content change protection**: if the same block changes more than 3 times within 30 seconds, automatic re-translation pauses to avoid fighting a live-updating page.
 - **Background tabs**: new requests pause while the page is hidden and resume when it becomes visible again.
+- **Unified cancellation**: stopping, route changes, and language changes cancel active requests, retry backoff, provider-queue waits, and old batches.
+- **Provider-aware cache**: entries record the actual provider and isolate provider selection, target language, fallback settings, DeepL key fingerprint, and protocol version.
+- **Credential protection**: only `:fx` DeepL keys are accepted; saved keys are never refilled into the input, and the settings UI uses a closed Shadow DOM so page scripts cannot read it through `host.shadowRoot`.
 
 ### Privacy
 
 - Only the text that needs translation is sent. Full-page HTML, page URLs, account information, and cookies are not uploaded.
 - Password fields, input fields, editable areas, and code blocks do not enter the translation queue automatically.
-- A DeepL key is stored only in the userscript manager's storage, not in page storage or logs.
+- A DeepL key is stored only in the userscript manager's storage, not in page storage or logs; saved keys are not refilled into the page input and the settings UI uses a closed Shadow DOM.
 - Translation-only mode hides source DOM locally; it does not delete or upload the original content.
 - Translation cache lives only in page memory and is cleared on refresh. Settings are stored in the userscript manager's local storage.
 - The script contains no analytics, reporting, or remote configuration.
@@ -323,15 +343,19 @@ Checks performed locally on 2026-10-22:
   - Switching between bilingual and translation-only modes created and unwrapped hidden containers correctly without duplicate requests;
   - Editing text inside a hidden source container triggered retranslation;
   - Heading size was preserved, and table/list/code layout remained normal with no console errors.
-- **Whole-screen speed (v0.4)**:
+- **Whole-screen speed (v0.5)**:
   - 24 paragraphs plus 8 flex word fragments merged into one token unit produced 26 segments and exactly one request;
-  - A real Microsoft request with 32 segments and 7,159 characters returned HTTP 200 in about 789ms;
+  - A 120-paragraph simulated batch dropped from about 1,354ms on v0.4.0 to about 837ms on v0.5.0, a 1.62x improvement;
+  - Scanning 1,000 candidates took about 18ms and 10,000 took about 164ms in the local headless run; cooperative slices keep discovery from monopolizing the main thread;
   - The whole batch rendered together, and bilingual/translation-only switching and restore still left no orphan nodes.
+- **v0.5.0 regression checks**:
+  - 18 scenarios: 15 normal-behavior passes, 0 failures, 2 performance observations, and 0 harness errors;
+  - Coverage included request and retry cancellation, dynamic insertions/removals, provider-aware cache isolation, French-to-English, Traditional-to-Simplified Chinese, CSS-hidden filtering, change-frequency protection, and closed Shadow DOM key isolation.
 - Installation, permission, and upgrade acceptance in real Tampermonkey / ScriptCat extensions is still pending, and DeepL has not been tested with a real key. These remain the required manual tests before release.
 
 ### Implementation notes
 
-To keep installation and distribution simple, v0.4.0 is a single `.user.js` file with no build step. The file is organized into settings, requests, provider adapters, extraction, scheduling, rendering, and UI sections. If site rules or providers grow, the source and build process can be split later.
+To keep installation and distribution simple, v0.5.0 is a single `.user.js` file with no build step. The file is organized into settings, requests, provider adapters, extraction, scheduling, rendering, and UI sections. If site rules or providers grow, the source and build process can be split later.
 
 The protocol and page-processing approach were informed by the following open-source projects. The implementation here is independent:
 

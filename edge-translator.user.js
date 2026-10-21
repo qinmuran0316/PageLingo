@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PageLingo — 双语网页翻译
 // @namespace    https://github.com/qinmuran0316/PageLingo
-// @version      0.4.0
+// @version      0.5.0
 // @description  PageLingo：用微软 / DeepL / Google / MyMemory 翻译网页，支持双语对照、仅译文、划词翻译和快捷键
 // @author       qinmuran0316
 // @license      MIT
@@ -23,7 +23,6 @@
 // @connect      api.mymemory.translated.net
 // @connect      translate.googleapis.com
 // @connect      api-free.deepl.com
-// @connect      api.deepl.com
 // @run-at       document-idle
 // @noframes
 // ==/UserScript==
@@ -34,12 +33,15 @@
   if (window.__EDGE_TRANSLATOR_LOADED__) return;
   window.__EDGE_TRANSLATOR_LOADED__ = true;
 
-  const VERSION = '0.4.0';
+  const VERSION = '0.5.0';
   const HOST_ID = 'et-translator-host';
   const STYLE_ID = 'et-page-style';
   const SETTINGS_KEY = 'et:settings:v1';
   const REQUEST_TIMEOUT = 10000;
-  const PROVIDER_GAP = 400;
+  const PROVIDER_GAP = 250;
+  const PAGE_CONCURRENCY = 2;
+  const SCAN_BUDGET_MS = 6;
+  const BATCH_WAIT_MS = 16;
   const MAX_BLOCK_CHARS = 1800;
   const MAX_BATCH_ITEMS = 32;
   const MAX_BATCH_CHARS = 8000;
@@ -136,7 +138,7 @@
   ]);
 
   const DEFAULTS = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     provider: 'auto',
     targetLang: 'zh-CN',
     autoFallback: true,
@@ -154,7 +156,44 @@
   // 基础工具
   // ---------------------------------------------------------------------------
 
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  function abortError() {
+    const error = new ProviderError('请求已取消', 'abort');
+    error.name = 'AbortError';
+    return error;
+  }
+
+  function throwIfAborted(signal) {
+    if (signal && signal.aborted) throw abortError();
+  }
+
+  function sleep(ms, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal && signal.aborted) { reject(abortError()); return; }
+      const cancel = () => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', cancel);
+        reject(abortError());
+      };
+      const timer = setTimeout(() => {
+        if (signal) signal.removeEventListener('abort', cancel);
+        resolve();
+      }, ms);
+      if (signal) signal.addEventListener('abort', cancel, { once: true });
+    });
+  }
+
+  function linkedController(signal) {
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener('abort', cancel, { once: true });
+    }
+    return {
+      controller,
+      release() { if (signal) signal.removeEventListener('abort', cancel); },
+    };
+  }
 
   function logWarn(...args) {
     if (DEBUG) console.warn('[Edge Translator]', ...args);
@@ -210,11 +249,25 @@
         cut = windowText.lastIndexOf(' ');
       }
       if (cut < limit * 0.3) cut = limit;
+      if (cut > 0 && /[\uD800-\uDBFF]/.test(rest[cut - 1]) && /[\uDC00-\uDFFF]/.test(rest[cut] || '')) cut -= 1;
       result.push(rest.slice(0, cut).trim());
       rest = rest.slice(cut).trim();
     }
     if (rest) result.push(rest);
     return result.filter(Boolean);
+  }
+
+  async function mapConcurrent(values, limit, mapper, signal) {
+    const out = new Array(values.length);
+    let cursor = 0;
+    await Promise.all(Array.from({ length: Math.min(limit, values.length) }, async () => {
+      while (cursor < values.length) {
+        throwIfAborted(signal);
+        const index = cursor++;
+        out[index] = await mapper(values[index], index);
+      }
+    }));
+    return out;
   }
 
   // ---------------------------------------------------------------------------
@@ -241,7 +294,10 @@
           GM_setValue(key, value);
           return;
         }
-        localStorage.setItem(key, value);
+        // A page storage fallback may hold public preferences, never credentials.
+        const safe = JSON.parse(value);
+        delete safe.deeplKey;
+        localStorage.setItem(key, JSON.stringify(safe));
       } catch (err) {
         logWarn('保存设置失败', err);
       }
@@ -285,13 +341,15 @@
   }
 
   function parseRetryAfter(headers) {
-    const match = /(?:^|\n)retry-after\s*:\s*(\d+)/i.exec(String(headers || ''));
+    const match = /(?:^|\n)retry-after\s*:\s*([^\r\n]+)/i.exec(String(headers || ''));
     if (!match) return 0;
-    return clamp(Number(match[1]) * 1000, 0, 5 * 60 * 1000);
+    const value = match[1].trim();
+    const delay = /^\d+$/.test(value) ? Number(value) * 1000 : Date.parse(value) - Date.now();
+    return Number.isFinite(delay) ? Math.max(0, delay) : 0;
   }
 
   const activeRequests = new Set();
-  let activeRequestPurpose = 'page';
+  const requestLanes = new Map();
 
   function abortPageRequests() {
     for (const request of Array.from(activeRequests)) {
@@ -301,28 +359,36 @@
     }
   }
 
-  function gmRequest(options) {
+  function gmRequest(options, context = {}) {
     let handle = null;
-    let aborted = false;
     let settled = false;
+    let cancel;
+    const signal = context.signal;
 
     const promise = new Promise((resolve, reject) => {
-      const api = getRequestApi();
-      if (!api) {
-        reject(new ProviderError('脚本管理器没有提供跨域请求能力', 'environment'));
-        return;
-      }
-
       const finish = (fn, value) => {
         if (settled) return;
         settled = true;
+        if (signal && cancel) signal.removeEventListener('abort', cancel);
         fn(value);
       };
+      cancel = () => {
+        finish(reject, abortError());
+        if (handle && typeof handle.abort === 'function') {
+          try { handle.abort(); } catch (err) { /* ignore */ }
+        }
+      };
+      if (signal && signal.aborted) { cancel(); return; }
+      if (signal) signal.addEventListener('abort', cancel, { once: true });
+      const api = getRequestApi();
+      if (!api) {
+        finish(reject, new ProviderError('脚本管理器没有提供跨域请求能力', 'environment'));
+        return;
+      }
 
       const failHttp = (response) => {
         const status = Number(response.status) || 0;
         const retryAfter = parseRetryAfter(response.responseHeaders);
-        const body = String(response.responseText || '').slice(0, 200);
         finish(
           reject,
           new ProviderError(
@@ -332,7 +398,7 @@
                 ? '接口免费额度已用完'
                 : status === 401 || status === 403
                   ? '接口拒绝访问'
-                  : `接口请求失败（HTTP ${status || '未知'}）${body ? '：' + body : ''}`,
+                  : `接口请求失败（HTTP ${status || '未知'}）`,
             status === 429
               ? 'rate'
               : status === 456
@@ -355,7 +421,7 @@
           timeout: options.timeout || REQUEST_TIMEOUT,
           anonymous: options.anonymous !== false,
           onload: (response) => {
-            if (aborted) return;
+            if (settled) return;
             if (response.status >= 200 && response.status < 300) {
               finish(resolve, {
                 status: response.status,
@@ -367,18 +433,15 @@
             }
           },
           onerror: (response) => {
-            if (aborted) return;
+            if (settled) return;
             finish(reject, new ProviderError('网络请求失败', 'network', 0, 0));
           },
           ontimeout: () => {
-            if (aborted) return;
+            if (settled) return;
             finish(reject, new ProviderError('请求超时', 'timeout', 0, 0));
           },
           onabort: () => {
-            aborted = true;
-            const err = new ProviderError('请求已取消', 'abort');
-            err.name = 'AbortError';
-            finish(reject, err);
+            finish(reject, abortError());
           },
         });
       } catch (err) {
@@ -386,22 +449,82 @@
         return;
       }
 
-      if (aborted && handle && typeof handle.abort === 'function') {
+      if (signal && signal.aborted && handle && typeof handle.abort === 'function') {
         try { handle.abort(); } catch (err) { /* ignore */ }
       }
     });
 
-    promise.abort = () => {
-      aborted = true;
-      if (handle && typeof handle.abort === 'function') {
-        try { handle.abort(); } catch (err) { /* ignore */ }
-      }
-    };
-    promise.__etPurpose = activeRequestPurpose;
+    promise.abort = () => cancel && cancel();
+    promise.__etPurpose = context.purpose || 'page';
     activeRequests.add(promise);
     const cleanup = () => activeRequests.delete(promise);
     promise.then(cleanup, cleanup);
     return promise;
+  }
+
+  function providerGap(name) {
+    return Math.max(name === 'mymemory' ? 1000 : name === 'google' ? 400 : PROVIDER_GAP,
+      providerStates[name].adaptiveGap || 0);
+  }
+
+  function drainRequestLane(name) {
+    const lane = requestLanes.get(name);
+    if (!lane || lane.timer) return;
+    lane.queue = lane.queue.filter((item) => !item.cancelled);
+    const maxActive = name === 'mymemory' ? 1 : 2;
+    if (!lane.queue.length || lane.active >= maxActive) return;
+    if (isCooling(name)) {
+      for (const item of lane.queue.splice(0)) {
+        item.cleanup();
+        item.reject(new ProviderError(cooldownMessage(name), 'cooldown'));
+      }
+      return;
+    }
+    const delay = providerStates[name].lastStart + providerGap(name) - Date.now();
+    if (delay > 0) {
+      lane.timer = setTimeout(() => { lane.timer = 0; drainRequestLane(name); }, delay);
+      return;
+    }
+    const priorityIndex = lane.queue.findIndex((item) => item.context.purpose === 'selection');
+    const item = lane.queue.splice(priorityIndex < 0 ? 0 : priorityIndex, 1)[0];
+    item.started = true;
+    item.cleanup();
+    if (item.context.signal && item.context.signal.aborted) {
+      item.reject(abortError());
+      drainRequestLane(name);
+      return;
+    }
+    lane.active += 1;
+    providerStates[name].lastStart = Date.now();
+    gmRequest(item.options, item.context).then(item.resolve, item.reject).finally(() => {
+      lane.active -= 1;
+      drainRequestLane(name);
+    });
+    drainRequestLane(name);
+  }
+
+  function providerRequest(name, options, context) {
+    return new Promise((resolve, reject) => {
+      const signal = context.signal;
+      if (signal && signal.aborted) { reject(abortError()); return; }
+      let lane = requestLanes.get(name);
+      if (!lane) {
+        lane = { active: 0, queue: [], timer: 0 };
+        requestLanes.set(name, lane);
+      }
+      const item = { options, context, resolve, reject, cancelled: false, started: false };
+      const cancel = () => {
+        if (item.started) return;
+        item.cancelled = true;
+        item.cleanup();
+        reject(abortError());
+        drainRequestLane(name);
+      };
+      item.cleanup = () => { if (signal) signal.removeEventListener('abort', cancel); };
+      if (signal) signal.addEventListener('abort', cancel, { once: true });
+      lane.queue.push(item);
+      drainRequestLane(name);
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -436,13 +559,14 @@
     if (!['auto', 'microsoft', 'deepl', 'google', 'mymemory'].includes(merged.provider)) {
       merged.provider = base.provider;
     }
-    merged.schemaVersion = 3;
+    merged.schemaVersion = 4;
     merged.autoFallback = merged.autoFallback !== false;
     merged.selection = merged.selection !== false;
     merged.allowLowQuality = merged.allowLowQuality === true;
     merged.fullPage = merged.fullPage === true;
     merged.translationOnly = merged.translationOnly === true;
-    merged.deeplKey = typeof merged.deeplKey === 'string' ? merged.deeplKey.trim() : '';
+    merged.deeplKey = typeof merged.deeplKey === 'string' && merged.deeplKey.trim().endsWith(':fx')
+      ? merged.deeplKey.trim() : '';
     return merged;
   }
 
@@ -468,18 +592,24 @@
   }
 
   // ---------------------------------------------------------------------------
-  // 缓存：内存 LRU，键为目标语言 + 原文
+  // 缓存：内存 LRU，隔离接口策略、目标语言与协议版本
   // ---------------------------------------------------------------------------
 
   const cache = new Map();
   let cacheBytes = 0;
 
-  function cacheKey(targetLang, text) {
-    return targetLang + '\u0000' + text;
+  function cacheScope() {
+    return JSON.stringify([2, location.origin, settings.provider,
+      settings.autoFallback, settings.allowLowQuality,
+      settings.deeplKey ? settings.deeplKey.slice(-8) : '']);
   }
 
-  function cacheGet(targetLang, text) {
-    const key = cacheKey(targetLang, text);
+  function cacheKey(targetLang, text, scope = cacheScope()) {
+    return scope + '\u0000' + targetLang + '\u0000' + text;
+  }
+
+  function cacheGet(targetLang, text, scope) {
+    const key = cacheKey(targetLang, text, scope);
     const value = cache.get(key);
     if (value === undefined) return null;
     cache.delete(key);
@@ -487,23 +617,23 @@
     return value;
   }
 
-  function cacheSet(targetLang, text, translation) {
+  function cacheSet(targetLang, text, translation, provider, scope) {
     if (!translation) return;
-    const key = cacheKey(targetLang, text);
-    const size = (key.length + translation.length) * 2 + 48;
+    const key = cacheKey(targetLang, text, scope);
+    const size = (key.length + translation.length) * 2 + 80;
     if (cache.has(key)) {
-      cacheBytes -= (key.length + (cache.get(key) || '').length) * 2 + 48;
+      cacheBytes -= cache.get(key).bytes;
       cache.delete(key);
     }
-    cache.set(key, translation);
+    cache.set(key, { translation, provider, bytes: size });
     cacheBytes += size;
     while (cache.size > CACHE_MAX_ITEMS || cacheBytes > CACHE_MAX_BYTES) {
       const oldest = cache.keys().next();
       if (oldest.done) break;
       const oldKey = oldest.value;
-      const oldValue = cache.get(oldKey) || '';
+      const oldValue = cache.get(oldKey);
       cache.delete(oldKey);
-      cacheBytes -= (oldKey.length + oldValue.length) * 2 + 48;
+      cacheBytes -= oldValue.bytes;
     }
   }
 
@@ -531,6 +661,7 @@
       lastFailAt: 0,
       lastError: '',
       lastOkAt: 0,
+      adaptiveGap: 0,
     };
   }
 
@@ -578,6 +709,7 @@
 
     if (err.kind === 'rate') {
       state.coolingUntil = now + (err.retryAfter || 60 * 1000);
+      state.adaptiveGap = Math.min(4000, Math.max(providerGap(name) * 2, 800));
     } else if (err.kind === 'denied') {
       state.coolingUntil = now + 10 * 60 * 1000;
     } else if (err.kind === 'protocol') {
@@ -592,34 +724,28 @@
 
   function noteProviderSuccess(name) {
     const state = providerStates[name];
-    state.failStreak = 0;
-    state.lastError = '';
     state.lastOkAt = Date.now();
-    state.coolingUntil = 0;
-  }
-
-  async function waitProviderGap(name) {
-    const state = providerStates[name];
-    if (state.coolingUntil > Date.now()) {
-      throw new ProviderError(cooldownMessage(name), 'cooldown');
+    // A success from an older parallel request must not clear a newer 429.
+    if (state.coolingUntil <= Date.now()) {
+      state.failStreak = 0;
+      state.lastError = '';
+      state.coolingUntil = 0;
+      state.adaptiveGap = Math.max(0, state.adaptiveGap - 50);
     }
-    const wait = state.lastStart + PROVIDER_GAP - Date.now();
-    if (wait > 0) await sleep(wait);
-    state.lastStart = Date.now();
   }
 
-  async function microsoftTranslate(texts, targetLang) {
+  async function microsoftTranslate(texts, targetLang, context) {
     const to = TARGETS[targetLang].microsoft;
     const url =
       'https://edge.microsoft.com/translate/translatetext?from=&to=' +
       encodeURIComponent(to) +
       '&isEnterpriseClient=false';
-    const response = await gmRequest({
+    const response = await providerRequest('microsoft', {
       method: 'POST',
       url,
       headers: { 'Content-Type': 'application/json' },
       data: JSON.stringify(texts),
-    });
+    }, context);
     let data;
     try {
       data = JSON.parse(response.text);
@@ -638,21 +764,28 @@
     });
   }
 
-  async function mymemoryTranslate(texts, targetLang) {
+  async function mymemoryTranslate(texts, targetLang, context) {
     const out = [];
-    let firstChunk = true;
     for (const text of texts) {
-      const chunks = splitText(text, 450);
+      const chunks = [];
+      let chunk = '';
+      let bytes = 0;
+      for (const char of text) {
+        const length = new TextEncoder().encode(char).length;
+        if (bytes + length > 450) { chunks.push(chunk); chunk = ''; bytes = 0; }
+        chunk += char;
+        bytes += length;
+      }
+      if (chunk) chunks.push(chunk);
       let joined = '';
       for (const chunk of chunks) {
-        if (!firstChunk) await waitProviderGap('mymemory');
-        firstChunk = false;
+        throwIfAborted(context.signal);
         const url =
           'https://api.mymemory.translated.net/get?q=' +
           encodeURIComponent(chunk) +
           '&langpair=' +
           encodeURIComponent('autodetect|' + TARGETS[targetLang].mymemory);
-        const response = await gmRequest({ method: 'GET', url });
+        const response = await providerRequest('mymemory', { method: 'GET', url }, context);
         let data;
         try {
           data = JSON.parse(response.text);
@@ -675,15 +808,13 @@
     return out;
   }
 
-  async function googleTranslate(texts, targetLang) {
-    const out = [];
-    let firstChunk = true;
-    for (const text of texts) {
-      const chunks = splitText(text, 1200);
+  async function googleTranslate(texts, targetLang, context) {
+    return mapConcurrent(texts, 2, async (text) => {
+      // 600 UTF-16 units keep even a fully escaped CJK URL comfortably short.
+      const chunks = splitText(text, 600);
       let joined = '';
       for (const chunk of chunks) {
-        if (!firstChunk) await waitProviderGap('google');
-        firstChunk = false;
+        throwIfAborted(context.signal);
         const url =
           'https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=' +
           encodeURIComponent(TARGETS[targetLang].google) +
@@ -692,7 +823,7 @@
         if (url.length > 7800) {
           throw new ProviderError('Google 请求 URL 过长', 'protocol');
         }
-        const response = await gmRequest({ method: 'GET', url });
+        const response = await providerRequest('google', { method: 'GET', url }, context);
         let data;
         try {
           data = JSON.parse(response.text);
@@ -711,20 +842,17 @@
         }
         joined += (joined ? ' ' : '') + translation;
       }
-      out.push(joined);
-    }
-    return out;
+      return joined;
+    }, context.signal);
   }
 
-  async function deeplTranslate(texts, targetLang) {
-    const key = String(settings.deeplKey || '').trim();
-    if (!key) {
-      throw new ProviderError('请先在设置中填写 DeepL API Key', 'environment');
+  async function deeplTranslate(texts, targetLang, context) {
+    const key = context.deeplKey;
+    if (!key || !key.endsWith(':fx')) {
+      throw new ProviderError('请在设置中填写 DeepL 免费版 API Key（以 :fx 结尾）', 'environment');
     }
-    const url = key.endsWith(':fx')
-      ? 'https://api-free.deepl.com/v2/translate'
-      : 'https://api.deepl.com/v2/translate';
-    const response = await gmRequest({
+    const url = 'https://api-free.deepl.com/v2/translate';
+    const response = await providerRequest('deepl', {
       method: 'POST',
       url,
       headers: {
@@ -736,7 +864,7 @@
         target_lang: TARGETS[targetLang].deepl,
         preserve_formatting: true,
       }),
-    });
+    }, context);
     let data;
     try {
       data = JSON.parse(response.text);
@@ -762,26 +890,23 @@
     mymemory: mymemoryTranslate,
   };
 
-  let providerChain = Promise.resolve();
-
-  function serializeProviderCall(task) {
-    const run = providerChain.then(task, task);
-    providerChain = run.catch(() => {});
-    return run;
-  }
-
-  async function requestWithRetry(name, texts, targetLang, budget) {
+  async function requestWithRetry(name, texts, targetLang, budget, context) {
     let lastError = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      throwIfAborted(context.signal);
       if (budget.remaining <= 0) break;
       budget.remaining -= 1;
-      await waitProviderGap(name);
+      const linked = linkedController(context.signal);
       try {
-        const result = await providerImpl[name](texts, targetLang);
+        const result = await providerImpl[name](texts, targetLang, { ...context, signal: linked.controller.signal });
+        throwIfAborted(context.signal);
         noteProviderSuccess(name);
         return result;
       } catch (err) {
+        linked.controller.abort();
+        throwIfAborted(context.signal);
         lastError = err;
+        if (!isAbortError(err) && err.kind !== 'cooldown') noteProviderFailure(name, err);
         if (
           isAbortError(err) ||
           err.kind === 'rate' ||
@@ -789,37 +914,48 @@
           err.kind === 'protocol' ||
           err.kind === 'quota' ||
           err.kind === 'environment' ||
+          err.kind === 'cooldown' ||
+          (err.kind === 'http' && err.status < 500 && err.status !== 408) ||
           attempt === 1 ||
           budget.remaining <= 0
         ) {
           throw err;
         }
-        await sleep(700 + Math.random() * 500);
+        await sleep(500 + Math.random() * 300, context.signal);
+      } finally {
+        linked.release();
       }
     }
     throw lastError || new ProviderError('翻译请求尝试次数已用完', 'budget');
   }
 
-  async function translateTexts(texts, targetLang, purpose) {
+  async function translateTexts(texts, targetLang, purpose = 'page', options = {}) {
     const clean = texts.map((text) => String(text || '').trim());
     if (!clean.length || clean.some((text) => !text)) {
       throw new ProviderError('存在空文本，已取消请求', 'protocol');
     }
 
-    return serializeProviderCall(async () => {
-      activeRequestPurpose = purpose === 'selection' ? 'selection' : 'page';
+      const context = {
+        purpose,
+        signal: options.signal || (purpose === 'page' && session.controller ? session.controller.signal : undefined),
+        deeplKey: settings.deeplKey,
+      };
+      throwIfAborted(context.signal);
       const order = getProviderOrder();
+      const allowFallback = settings.autoFallback;
       const budget = { remaining: 3 };
       let lastError = null;
 
       for (const name of order) {
+        throwIfAborted(context.signal);
         if (budget.remaining <= 0) break;
         if (isCooling(name)) {
           lastError = new ProviderError(cooldownMessage(name), 'cooldown');
           continue;
         }
         try {
-          const translations = await requestWithRetry(name, clean, targetLang, budget);
+          const translations = await requestWithRetry(name, clean, targetLang, budget, context);
+          throwIfAborted(context.signal);
           reportStatus({
             provider: name,
             message: `正在使用 ${providerLabel(name)}`,
@@ -829,15 +965,13 @@
         } catch (err) {
           if (isAbortError(err)) throw err;
           lastError = err;
-          noteProviderFailure(name, err);
-          if (!settings.autoFallback) break;
+          if (!allowFallback) break;
         }
       }
 
       if (!lastError) lastError = new ProviderError('没有可用的翻译接口', 'unavailable');
       if (lastError.kind === 'cooldown') throw lastError;
       throw lastError;
-    });
   }
 
   // ---------------------------------------------------------------------------
@@ -884,6 +1018,16 @@
     generation: 0,
     queue: [],
     busy: false,
+    inFlight: 0,
+    controller: null,
+    elements: new Set(),
+    pendingTexts: new Map(),
+    scanJobs: [],
+    scanRoots: new Set(),
+    scanHandle: 0,
+    scanStats: { slices: 0, maxSliceMs: 0, candidates: 0 },
+    cleanupJobs: [],
+    cleanupHandle: 0,
     io: null,
     mo: null,
     urlTimer: 0,
@@ -900,18 +1044,28 @@
     childList: true,
     subtree: true,
     characterData: true,
+    attributes: true,
+    attributeFilter: ['hidden', 'aria-hidden', 'class', 'style', 'translate', 'lang'],
   };
 
+  let mutationPauseDepth = 0;
+
   function withMutationPaused(task) {
+    if (mutationPauseDepth) return task();
+    mutationPauseDepth += 1;
     const shouldResume = !!(session.mo && session.active && document.body);
+    let pending = [];
     if (shouldResume) {
+      pending = session.mo.takeRecords();
       try { session.mo.disconnect(); } catch (err) { /* ignore */ }
     }
     try {
       return task();
     } finally {
+      mutationPauseDepth -= 1;
       if (shouldResume && session.mo && session.active && document.body) {
         try { session.mo.observe(document.body, MUTATION_OBSERVER_OPTIONS); } catch (err) { /* ignore */ }
+        if (pending.length) handleMutations(pending);
       }
     }
   }
@@ -924,7 +1078,14 @@
   let changeGuard = new WeakMap();
 
   function resetSessionState() {
+    cancelScan();
+    cancelCleanup();
     session.queue = [];
+    session.inFlight = 0;
+    session.busy = false;
+    session.elements = new Set();
+    session.pendingTexts = new Map();
+    session.scanStats = { slices: 0, maxSliceMs: 0, candidates: 0 };
     session.failedElements = new Set();
     session.translations = new Set();
     session.sourceWrappers = new Set();
@@ -1006,117 +1167,90 @@
   // 段落提取
   // ---------------------------------------------------------------------------
 
-  const TEXT_SPACED_TAGS = new Set([
-    'A', 'SPAN', 'P', 'DIV', 'SECTION', 'ARTICLE', 'MAIN', 'HEADER', 'FOOTER', 'NAV', 'ASIDE',
-    'UL', 'OL', 'LI', 'DL', 'DT', 'DD', 'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TD', 'TH',
-    'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'FIGCAPTION', 'CAPTION', 'LABEL',
-    'FORM', 'FIELDSET',
-  ]);
   const TEXT_SKIP_SELECTOR = [
-    '.et-translation',
-    'script',
-    'style',
-    'noscript',
-    'template',
-    'pre',
-    'code',
-    'kbd',
-    'samp',
-    '[hidden]',
-    '[aria-hidden="true"]',
-    '[translate="no"]',
-    '.notranslate',
-    '[contenteditable]',
-    'button',
-    '[role="button"]',
-    '[role="tab"]',
-    '[role="menuitem"]',
-    '[role="menu"]',
-    '[role="menubar"]',
-    'summary',
-    'svg',
-    'math',
-    'canvas',
-    'iframe',
-    'object',
-    'embed',
-    'audio',
-    'video',
-    'textarea',
-    'input',
-    'select',
-    'option',
+    '.et-translation', 'script', 'style', 'noscript', 'template', 'pre', 'code',
+    'kbd', 'samp', '[hidden]', '[aria-hidden="true"]', '[translate="no"]',
+    '.notranslate', '[contenteditable]', 'button', '[role="button"]',
+    '[role="tab"]', '[role="menuitem"]', '[role="menu"]', '[role="menubar"]',
+    'summary', 'svg', 'math', 'canvas', 'iframe', 'object', 'embed', 'audio',
+    'video', 'textarea', 'input', 'select', 'option',
   ].join(',');
 
-  function extractNodeText(node) {
+  function textContext() {
+    return { styles: new WeakMap() };
+  }
+
+  function readStyle(el, context) {
+    let style = context.styles.get(el);
+    if (!style) {
+      try { style = getComputedStyle(el); } catch (err) { return null; }
+      context.styles.set(el, style);
+    }
+    return style;
+  }
+
+  function hiddenStyle(style) {
+    return !style || style.display === 'none' || style.visibility === 'hidden' ||
+      style.visibility === 'collapse' || style.contentVisibility === 'hidden';
+  }
+
+  function extractNodeText(node, context = textContext()) {
     if (node.nodeType === 3) return node.nodeValue || '';
     if (node.nodeType !== 1) return '';
-    if (node.matches(TEXT_SKIP_SELECTOR)) return '';
+    const originalWrapper = session.sourceWrappers.has(node);
+    if (!originalWrapper && node.matches(TEXT_SKIP_SELECTOR)) return '';
+    const style = readStyle(node, context);
+    if (!originalWrapper && hiddenStyle(style)) return '';
     if (node.tagName === 'BR') return ' ';
-
+    const layout = !originalWrapper && style &&
+      (style.display.includes('flex') || style.display.includes('grid'));
     let text = '';
     for (const child of node.childNodes) {
-      text += extractNodeText(child);
+      const fragment = extractNodeText(child, context);
+      if (!fragment) continue;
+      if (layout && text && child.nodeType === 1) text += ' ';
+      text += fragment;
     }
-    if (TEXT_SPACED_TAGS.has(node.tagName)) return ' ' + text + ' ';
+    // Inline markup can divide a word. Only actual block boundaries add spaces.
+    if (!originalWrapper && style && isBlockLikeDisplay(style.display) &&
+      !isInlineBoxDisplay(style.display)) return ' ' + text + ' ';
     return text;
   }
 
-  function getSourceText(el) {
-    return normalizeText(extractNodeText(el));
+  function getSourceText(el, context) {
+    return normalizeText(extractNodeText(el, context));
   }
 
   function isChromeElement(el) {
     if (settings.fullPage) return false;
     const chrome = el.closest(CHROME_SELECTOR);
-    if (!chrome) return false;
-    return !chrome.closest('main,article,[role="main"]');
+    return !!chrome && !chrome.closest('main,article,[role="main"]');
   }
 
-  function isWorthTranslating(text) {
+  function isWorthTranslating(text, el) {
     const value = normalizeText(text);
-    if (value.length < 2) return false;
-
-    const letters = value.match(
-      /[A-Za-z\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF\u0590-\u05FF\u0600-\u06FF\u0900-\u097F\u0E00-\u0E7F\u3040-\u30FF\uAC00-\uD7AF\u4E00-\u9FFF]/g
-    );
-    if (!letters || letters.length < 2) return false;
-
-    const compact = value.replace(/\s+/g, '');
-    if (!compact) return false;
-
+    if (value.length < 2 || !/[\p{L}].*[\p{L}]/u.test(value)) return false;
+    // Script/alphabet ratios cannot distinguish French from English or Han variants.
+    const langNode = el && el.closest('[lang]');
+    const lang = langNode ? (langNode.getAttribute('lang') || '').toLowerCase().replace(/_/g, '-') : '';
     const target = settings.targetLang;
-    const cjk = (value.match(/[\u3400-\u9FFF\uF900-\uFAFF]/g) || []).length;
-    const kana = (value.match(/[\u3040-\u30FF]/g) || []).length;
-    const hangul = (value.match(/[\uAC00-\uD7AF]/g) || []).length;
-    const ascii = (value.match(/[A-Za-z]/g) || []).length;
-
-    if (target === 'zh-CN' || target === 'zh-TW') {
-      if (cjk >= 4 && cjk / compact.length > 0.55) return false;
-    } else if (target === 'ja') {
-      if (kana >= 3 && (kana + cjk) / compact.length > 0.6) return false;
-    } else if (target === 'ko') {
-      if (hangul >= 3 && hangul / compact.length > 0.5) return false;
-    } else if (target === 'en') {
-      if (ascii >= 4 && ascii / compact.length > 0.75) return false;
-    }
+    if (target === 'zh-CN' && /^(zh-hans(?:-|$)|zh-(cn|sg)$)/.test(lang)) return false;
+    if (target === 'zh-TW' && /^(zh-hant(?:-|$)|zh-(tw|hk|mo)$)/.test(lang)) return false;
+    if (target === 'en' && /^en(?:-|$)/.test(lang)) return false;
+    if (target === 'ja' && /^ja(?:-|$)/.test(lang)) return false;
+    if (target === 'ko' && /^ko(?:-|$)/.test(lang)) return false;
     return true;
   }
 
-  function isEligibleTextBlock(el) {
+  function isEligibleTextBlock(el, context) {
     if (!el || !el.isConnected || !el.tagName) return false;
     if (el === document.body || el === document.documentElement) return false;
     if (el.closest('#' + HOST_ID + ',.et-translation')) return false;
     if (el.closest(SKIP_CLOSEST_SELECTOR) || el.closest(SITE_SKIP_SELECTOR)) return false;
     if (isChromeElement(el)) return false;
-    if (el.getAttribute('translate') === 'no') return false;
-
     const state = elementStates.get(el);
-    if (state && (state.status === 'done' || state.status === 'queued' || state.status === 'active')) {
-      return false;
-    }
-    const text = getSourceText(el);
-    return isWorthTranslating(text);
+    if (state && ['done', 'queued', 'active'].includes(state.status)) return false;
+    return isWorthTranslating(getSourceText(el, context), el);
   }
 
   function isBlockLikeDisplay(display) {
@@ -1124,12 +1258,7 @@
   }
 
   function isInlineBoxDisplay(display) {
-    return (
-      display === 'inline-block' ||
-      display === 'inline-flex' ||
-      display === 'inline-grid' ||
-      display === 'inline-table'
-    );
+    return ['inline-block', 'inline-flex', 'inline-grid', 'inline-table'].includes(display);
   }
 
   function hasDirectText(el) {
@@ -1139,97 +1268,139 @@
     return false;
   }
 
-  function collectCandidates(root) {
-    const found = new Set();
+  function* candidateSteps(root) {
     const base = root && root.nodeType === 9 ? (root.body || root.documentElement) : root;
-    if (!base || !base.isConnected || base.nodeType !== 1) return [];
-    if (base.closest('#' + HOST_ID + ',.et-translation')) return [];
+    if (!base || !base.isConnected || base.nodeType !== 1) return;
+    if (base.closest('#' + HOST_ID + ',.et-translation,.et-source-hidden')) return;
+    const context = textContext();
+    const skipped = el => el.matches(SKIP_CLOSEST_SELECTOR) || !!el.closest(SITE_SKIP_SELECTOR);
 
-    const displayCache = new WeakMap();
-    const getStyle = (el) => {
-      let style = displayCache.get(el);
-      if (!style) {
-        try {
-          style = getComputedStyle(el);
-        } catch (err) {
-          style = null;
-        }
-        displayCache.set(el, style);
+    function* childrenOf(el) {
+      for (let child = el.firstElementChild; child; child = child.nextElementSibling) {
+        yield* visit(child);
       }
-      return style;
-    };
-    const isHidden = (style) =>
-      !style ||
-      style.display === 'none' ||
-      style.visibility === 'hidden' ||
-      style.visibility === 'collapse';
-    const isSkippedNode = (el) =>
-      el.matches(SKIP_CLOSEST_SELECTOR) || !!el.closest(SITE_SKIP_SELECTOR);
+    }
 
-    const visit = (el) => {
-      if (!el.isConnected || isSkippedNode(el)) return;
-      const style = getStyle(el);
-      if (isHidden(style)) return;
-
-      if (INLINE_DISPLAYS.has(style.display)) {
-        for (const child of el.children) visit(child);
+    function* visit(el) {
+      yield null; // Let discovery yield even in a large tree with no candidates.
+      if (!el.isConnected || skipped(el) || isChromeElement(el)) return;
+      const previous = elementStates.get(el);
+      if (previous && ['done', 'queued', 'active'].includes(previous.status)) return;
+      const style = readStyle(el, context);
+      if (hiddenStyle(style)) return;
+      if (el === document.body || el === document.documentElement) {
+        yield* childrenOf(el);
         return;
       }
-
+      if (INLINE_DISPLAYS.has(style.display)) {
+        if (el.parentElement === document.body && isEligibleTextBlock(el, context)) yield el;
+        else yield* childrenOf(el);
+        return;
+      }
       const flowText = TEXT_FLOW_TAGS.has(el.tagName);
       const directText = hasDirectText(el);
+      const layout = style.display.includes('flex') || style.display.includes('grid');
+      // Stream article/feed children immediately instead of inspecting all siblings.
+      if (!flowText && !directText && !layout && el.childElementCount > 1) {
+        const first = el.firstElementChild;
+        const second = first.nextElementSibling;
+        const firstStyle = readStyle(first, context);
+        const secondStyle = readStyle(second, context);
+        if (!hiddenStyle(firstStyle) && !hiddenStyle(secondStyle) &&
+          isBlockLikeDisplay(firstStyle.display) && !isInlineBoxDisplay(firstStyle.display) &&
+          isBlockLikeDisplay(secondStyle.display) && !isInlineBoxDisplay(secondStyle.display)) {
+          yield* childrenOf(el);
+          return;
+        }
+      }
       const blockChildren = [];
       for (const child of el.children) {
-        if (isSkippedNode(child)) continue;
-        const childStyle = getStyle(child);
-        if (isHidden(childStyle)) continue;
+        yield null;
+        if (skipped(child)) continue;
+        const childStyle = readStyle(child, context);
+        if (hiddenStyle(childStyle)) continue;
         if (childStyle.display === 'contents') {
           if (normalizeText(child.textContent)) blockChildren.push(child);
           continue;
         }
         if (!isBlockLikeDisplay(childStyle.display)) continue;
         if (isInlineBoxDisplay(childStyle.display) && (flowText || directText)) continue;
-        if (!normalizeText(child.textContent)) continue;
-        blockChildren.push(child);
+        if (normalizeText(child.textContent)) blockChildren.push(child);
       }
-
       if (!blockChildren.length) {
-        if (isEligibleTextBlock(el)) found.add(el);
+        if (isEligibleTextBlock(el, context)) yield el;
         return;
       }
-
-      const layoutContainer = style.display.includes('flex') || style.display.includes('grid');
-      if (layoutContainer && blockChildren.length >= 2) {
-        const fragmentLengths = blockChildren.map((child) => normalizeText(child.textContent).length);
-        const allInlineFragments =
-          blockChildren.every((child) => INLINE_ORIGIN_TAGS.has(child.tagName)) &&
-          fragmentLengths.every((length) => length <= 120) &&
-          fragmentLengths.reduce((sum, length) => sum + length, 0) / fragmentLengths.length <= 40;
-        if (allInlineFragments) {
-          if (isEligibleTextBlock(el)) found.add(el);
+      if (layout && blockChildren.length >= 2) {
+        const lengths = blockChildren.map(child => normalizeText(child.textContent).length);
+        if (blockChildren.every(child => INLINE_ORIGIN_TAGS.has(child.tagName)) &&
+          lengths.every(length => length <= 120) &&
+          lengths.reduce((sum, length) => sum + length, 0) / lengths.length <= 40) {
+          if (isEligibleTextBlock(el, context)) yield el;
           return;
         }
       }
-
-      if (
-        directText &&
-        (flowText || (blockChildren.length <= 2 && normalizeText(el.textContent).length <= 260))
-      ) {
-        if (isEligibleTextBlock(el)) found.add(el);
+      if (directText && (flowText ||
+        (blockChildren.length <= 2 && normalizeText(el.textContent).length <= 260))) {
+        if (isEligibleTextBlock(el, context)) yield el;
         return;
       }
+      for (const child of blockChildren) yield* visit(child);
+    }
+    yield* visit(base);
+  }
 
-      const blockSet = new Set(blockChildren);
-      for (const child of blockChildren) visit(child);
-      for (const child of el.children) {
-        if (blockSet.has(child)) continue;
-        const childStyle = getStyle(child);
-        if (childStyle && childStyle.display === 'contents') visit(child);
+  function collectCandidates(root) {
+    return Array.from(candidateSteps(root)).filter(Boolean);
+  }
+
+  const scanChannel = new MessageChannel();
+  const scanTasks = new Map();
+  let scanTaskId = 0;
+  scanChannel.port1.onmessage = event => {
+    const task = scanTasks.get(event.data);
+    scanTasks.delete(event.data);
+    if (task) task();
+  };
+
+  function postScanTask(task) {
+    const id = ++scanTaskId;
+    scanTasks.set(id, task);
+    scanChannel.port2.postMessage(id);
+    return id;
+  }
+
+  function runScanSlice() {
+    session.scanHandle = 0;
+    if (!session.active || document.hidden) return;
+    const started = performance.now();
+    let steps = 0;
+    while (session.scanJobs.length && steps++ < 160 && performance.now() - started < SCAN_BUDGET_MS) {
+      const job = session.scanJobs[0];
+      const next = job.iterator.next();
+      if (next.done) {
+        session.scanJobs.shift();
+        session.scanRoots.delete(job.root);
+      } else if (next.value) {
+        const el = next.value;
+        if (observed.has(el) || !el.isConnected) continue;
+        observed.add(el);
+        session.scanStats.candidates += 1;
+        if (settings.fullPage) enqueueElement(el);
+        else if (session.io) session.io.observe(el);
+        else enqueueElement(el);
       }
-    };
+    }
+    session.scanStats.slices += 1;
+    session.scanStats.maxSliceMs = Math.max(session.scanStats.maxSliceMs, performance.now() - started);
+    if (session.scanJobs.length && session.active) session.scanHandle = postScanTask(runScanSlice);
+  }
 
-    visit(base);
-    return Array.from(found);
+  function cancelScan() {
+    if (session.scanHandle) scanTasks.delete(session.scanHandle);
+    session.scanHandle = 0;
+    session.scanJobs = [];
+    session.scanRoots.clear();
   }
 
   function ensureIntersectionObserver() {
@@ -1250,18 +1421,10 @@
   function observeCandidates(root) {
     if (!session.active) return;
     ensureIntersectionObserver();
-    const candidates = collectCandidates(root);
-    for (const el of candidates) {
-      if (!session.active) return;
-      if (observed.has(el)) continue;
-      const state = elementStates.get(el);
-      if (state && (state.status === 'done' || state.status === 'queued' || state.status === 'active')) {
-        continue;
-      }
-      observed.add(el);
-      if (session.io) session.io.observe(el);
-      else enqueueElement(el);
-    }
+    if (!root || session.scanRoots.has(root)) return;
+    session.scanRoots.add(root);
+    session.scanJobs.push({ root, iterator: candidateSteps(root) });
+    if (!session.scanHandle && !document.hidden) session.scanHandle = postScanTask(runScanSlice);
   }
 
   // ---------------------------------------------------------------------------
@@ -1289,7 +1452,7 @@
       for (const root of roots) {
         if (root.isConnected && !isOwnNode(root)) observeCandidates(root);
       }
-    }, 350);
+    }, 120);
   }
 
   function bumpChangeGuard(el) {
@@ -1308,24 +1471,28 @@
     if (el.closest('.et-translation,#' + HOST_ID)) return;
     const previous = recheckTimers.get(el);
     if (previous) clearTimeout(previous);
+    const generation = session.generation;
     const timer = window.setTimeout(() => {
       recheckTimers.delete(el);
-      if (!session.active || !el.isConnected) return;
+      if (!session.active || generation !== session.generation || !el.isConnected) return;
       const state = elementStates.get(el);
-      if (!state || state.status === 'queued' || state.status === 'active') return;
+      if (!state || state.status === 'paused' || state.status === 'queued' || state.status === 'active') return;
       const text = getSourceText(el);
-      if (normalizeText(text) === state.text) return;
-
+      if (text === state.text && state.translationEl && state.translationEl.isConnected) return;
       if (!bumpChangeGuard(el)) {
-        reportStatus({ kind: 'error', message: '页面内容频繁变化，已暂停自动重译此段' });
-        syncUi();
+        state.status = 'paused';
+        removeTranslationNode(state.translationEl);
+        state.translationEl = null;
+        session.failedElements.add(el);
+        reportStatus({ kind: 'error', message: '页面内容频繁变化，已暂停此段，可点击重试继续' });
         return;
       }
-
       removeTranslationNode(state.translationEl);
       elementStates.delete(el);
+      session.elements.delete(el);
+      observed.delete(el);
       enqueueElement(el);
-    }, 800);
+    }, 250);
     recheckTimers.set(el, timer);
   }
 
@@ -1338,38 +1505,95 @@
     return null;
   }
 
+  function mutationRoot(node) {
+    let el = node && (node.nodeType === 1 ? node : node.parentElement);
+    if (!el) return null;
+    const wrapper = el.closest('.et-source-hidden');
+    if (wrapper) return wrapper.parentElement;
+    while (el.parentElement && el.parentElement !== document.body &&
+      INLINE_ORIGIN_TAGS.has(el.tagName)) el = el.parentElement;
+    return el;
+  }
+
+  function* detachedSteps(root) {
+    yield root;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    let node;
+    while ((node = walker.nextNode())) yield node;
+  }
+
+  function queueDetachedCleanup(root) {
+    if (!root || root.nodeType !== 1) return;
+    session.cleanupJobs.push({ root, iterator: detachedSteps(root) });
+    if (!session.cleanupHandle) session.cleanupHandle = postScanTask(runCleanupSlice);
+  }
+
+  function runCleanupSlice() {
+    session.cleanupHandle = 0;
+    if (!session.active) return;
+    const start = performance.now();
+    while (session.cleanupJobs.length && performance.now() - start < SCAN_BUDGET_MS) {
+      const job = session.cleanupJobs[0];
+      if (job.root.isConnected) { session.cleanupJobs.shift(); continue; }
+      const next = job.iterator.next();
+      if (next.done) { session.cleanupJobs.shift(); continue; }
+      const el = next.value;
+      if (session.io) session.io.unobserve(el);
+      observed.delete(el);
+      const state = elementStates.get(el);
+      if (state) {
+        removeTranslationNode(state.translationEl);
+        elementStates.delete(el);
+        session.elements.delete(el);
+        session.failedElements.delete(el);
+      }
+      if (session.translations.has(el)) {
+        const owner = el.__etOwner;
+        removeTranslationNode(el);
+        if (owner && owner.isConnected) scheduleRecheck(owner);
+      }
+      if (session.sourceWrappers.has(el)) unwrapSourceWrapper(el);
+    }
+    if (session.cleanupJobs.length) session.cleanupHandle = postScanTask(runCleanupSlice);
+  }
+
+  function cancelCleanup() {
+    if (session.cleanupHandle) scanTasks.delete(session.cleanupHandle);
+    session.cleanupHandle = 0;
+    session.cleanupJobs = [];
+  }
+
   function handleMutations(records) {
     if (!session.active) return;
     for (const record of records) {
+      const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+      if (!target || target.closest('.et-translation,#' + HOST_ID)) continue;
+      const stateful = findStatefulAncestor(target);
+      if (stateful) scheduleRecheck(stateful);
       if (record.type === 'childList') {
-        for (const node of record.addedNodes) {
-          const parentEl = node.nodeType === 1 ? node : node.parentElement;
-          if (!parentEl) continue;
-          if (parentEl.closest('.et-translation,#' + HOST_ID)) continue;
-
-          const sourceWrapper = parentEl.closest('.et-source-hidden');
-          if (sourceWrapper) {
-            const translatedEl = findStatefulAncestor(sourceWrapper.parentElement);
-            if (translatedEl) scheduleRecheck(translatedEl);
-            continue;
-          }
-
-          if (node.nodeType !== 1) {
-            const statefulParent = findStatefulAncestor(parentEl);
-            if (statefulParent) scheduleRecheck(statefulParent);
-            continue;
-          }
-
-          if (isOwnNode(node)) continue;
-          pendingScanRoots.add(node);
-          const parentCandidate = findStatefulAncestor(node.parentElement);
-          if (parentCandidate) scheduleRecheck(parentCandidate);
+        for (const node of record.removedNodes) queueDetachedCleanup(node);
+        if (!stateful && (record.removedNodes.length ||
+          Array.from(record.addedNodes).some(node => node.nodeType === 3))) {
+          const root = mutationRoot(target);
+          if (root) pendingScanRoots.add(root);
         }
-      } else if (record.type === 'characterData') {
-        const parent = record.target && record.target.parentElement;
-        if (!parent || parent.closest('.et-translation,#' + HOST_ID)) continue;
-        const el = findStatefulAncestor(parent);
-        if (el) scheduleRecheck(el);
+        for (const node of record.addedNodes) {
+          if (node.nodeType !== 1 || isOwnNode(node)) continue;
+          if (node.closest('.et-source-hidden')) continue;
+          const root = mutationRoot(node);
+          if (root) pendingScanRoots.add(root);
+        }
+      } else if (record.type === 'characterData' && !stateful) {
+        const root = mutationRoot(target);
+        if (root) pendingScanRoots.add(root);
+      } else if (record.type === 'attributes') {
+        for (const el of session.elements) {
+          if (el !== target && target.contains(el)) scheduleRecheck(el);
+        }
+        if (!stateful && !isOwnNode(target)) {
+          const root = mutationRoot(target);
+          if (root) pendingScanRoots.add(root);
+        }
       }
     }
     if (pendingScanRoots.size) scheduleScan();
@@ -1406,10 +1630,18 @@
   // 调度与渲染
   // ---------------------------------------------------------------------------
 
+  let progressFrame = 0;
+  let progressMessage = '';
+
   function pushStatusProgress(extraMessage) {
-    const pending = session.queue.length;
+    if (extraMessage) progressMessage = extraMessage;
+    if (progressFrame) return;
+    progressFrame = requestAnimationFrame(() => {
+    progressFrame = 0;
+    if (!session.active) { progressMessage = ''; return; }
+    const pending = session.queue.length + session.inFlight;
     const message =
-      extraMessage ||
+      progressMessage ||
       (pending > 0
         ? `正在翻译… 已完成 ${session.stats.done} 段`
         : `已翻译 ${session.stats.done} 段${session.stats.failed ? `，失败 ${session.stats.failed} 段` : ''}`);
@@ -1419,9 +1651,10 @@
       done: session.stats.done,
       failed: session.stats.failed,
       pending,
-      kind: session.stats.failed ? 'error' : pending ? 'working' : 'done',
+      kind: session.stats.failed ? 'error' : (pending || session.scanJobs.length) ? 'working' : 'done',
     });
-    syncUi();
+    progressMessage = '';
+    });
   }
 
   function schedulePump(delay) {
@@ -1431,7 +1664,18 @@
       session.retryTimer = 0;
       if (!session.active) return;
       pump();
-    }, delay || 0);
+    }, delay === undefined ? BATCH_WAIT_MS : delay);
+  }
+
+  function readElementLayout(el) {
+    const style = getComputedStyle(el);
+    const parentStyle = el.parentElement ? getComputedStyle(el.parentElement) : null;
+    return {
+      display: style.display,
+      direction: style.flexDirection || 'row',
+      parentLayout: !!parentStyle &&
+        (parentStyle.display.includes('flex') || parentStyle.display.includes('grid')),
+    };
   }
 
   function ensureTranslationNode(el, state) {
@@ -1443,19 +1687,17 @@
     node.dataset.et = 'translation';
     node.dataset.state = 'loading';
     node.dataset.mode = settings.translationOnly ? 'only' : 'bilingual';
+    node.__etOwner = el;
 
     if (settings.translationOnly) {
       node.__etSourceWrapper = wrapSourceContent(el);
     }
 
-    const style = getComputedStyle(el);
+    const layout = state.layout || readElementLayout(el);
     const parent = el.parentElement;
-    const parentStyle = parent ? getComputedStyle(parent) : null;
-    const isFlex = style.display.includes('flex');
-    const isGrid = style.display.includes('grid');
-    const parentIsLayout =
-      parentStyle && (parentStyle.display.includes('flex') || parentStyle.display.includes('grid'));
-    const keepInside = el.matches('td,th,li') || !parent || parentIsLayout;
+    const isFlex = layout.display.includes('flex');
+    const isGrid = layout.display.includes('grid');
+    const keepInside = el.matches('td,th,li') || !parent || layout.parentLayout;
 
     if ((isFlex || isGrid) && !keepInside) {
       parent.insertBefore(node, el.nextSibling);
@@ -1467,7 +1709,7 @@
         if (isGrid) {
           node.style.gridColumn = '1 / -1';
         } else {
-          const direction = style.flexDirection || 'row';
+          const direction = layout.direction;
           if (!direction.startsWith('column')) node.style.flexBasis = '100%';
         }
       }
@@ -1486,11 +1728,12 @@
     if (!node) return;
     node.textContent = values.join(' ');
     node.dataset.state = state.status === 'failed' ? 'error' : state.pending > 0 ? 'loading' : 'done';
-    node.title = `机器翻译${lastProvider ? ' · ' + providerLabel(lastProvider) : ''}`;
-    if (lastProvider) node.dataset.provider = lastProvider;
+    const providers = Array.from(new Set(state.providers.filter(Boolean)));
+    node.title = '机器翻译' + (providers.length ? ' · ' + providers.map(providerLabel).join(' / ') : '');
+    if (providers.length) node.dataset.provider = providers.join(',');
   }
 
-  function finalizeElementIfReady(el, state) {
+  function finalizeElementIfReady(el, state, deferRender = false) {
     if (state.pending > 0) return;
     const failed = state.failedParts.size > 0;
     state.status = failed ? 'failed' : 'done';
@@ -1498,21 +1741,20 @@
       session.failedElements.add(el);
     } else {
       session.failedElements.delete(el);
-      changeGuard.delete(el);
     }
-    renderElement(el, state);
+    if (!deferRender) renderElement(el, state);
   }
 
   function enqueueElement(el) {
     if (!session.active || !el || !el.isConnected) return;
     if (el.closest('.et-translation,#' + HOST_ID)) return;
     const previous = elementStates.get(el);
-    if (previous && (previous.status === 'queued' || previous.status === 'active' || previous.status === 'done')) {
+    if (previous && ['queued', 'active', 'done', 'paused'].includes(previous.status)) {
       return;
     }
 
     const text = getSourceText(el);
-    if (!isWorthTranslating(text)) return;
+    if (!isWorthTranslating(text, el)) return;
     const chunks = splitText(text, MAX_BLOCK_CHARS);
     if (!chunks.length) return;
 
@@ -1522,6 +1764,10 @@
       text,
       chunks,
       results: new Array(chunks.length),
+      providers: new Array(chunks.length),
+      targetLang: settings.targetLang,
+      scope: cacheScope(),
+      layout: null,
       failedParts: new Set(),
       status: 'queued',
       generation: session.generation,
@@ -1529,11 +1775,14 @@
       translationEl: null,
     };
     elementStates.set(el, state);
+    session.elements.add(el);
 
     for (let index = 0; index < chunks.length; index += 1) {
-      const cached = cacheGet(settings.targetLang, chunks[index]);
+      const cached = cacheGet(state.targetLang, chunks[index], state.scope);
       if (cached) {
-        state.results[index] = cached;
+        state.results[index] = cached.translation;
+        state.providers[index] = cached.provider;
+        lastProvider = cached.provider || lastProvider;
         session.stats.total += 1;
         session.stats.done += 1;
         continue;
@@ -1545,6 +1794,7 @@
         text: chunks[index],
         partIndex: index,
         generation: session.generation,
+        state,
       });
     }
 
@@ -1557,35 +1807,39 @@
     }
     renderElement(el, state);
     pushStatusProgress();
-    schedulePump(0);
+    schedulePump();
   }
 
-  function markJobFailed(job, err) {
+  function markJobFailed(job, err, deferRender = false) {
     const state = elementStates.get(job.el);
-    if (!state || state.generation !== job.generation) return;
+    if (!state || state !== job.state || state.generation !== job.generation) return;
     if (state.results[job.partIndex] !== undefined) return;
     state.failedParts.add(job.partIndex);
     state.pending = Math.max(0, state.pending - 1);
     session.stats.failed += 1;
     session.failedElements.add(job.el);
-    finalizeElementIfReady(job.el, state);
+    finalizeElementIfReady(job.el, state, deferRender);
     logWarn('段落翻译失败', err && err.kind, err && err.message);
   }
 
-  function applyJobResult(job, translation, providerName) {
+  function applyJobResult(job, translation, providerName, snapshot, deferRender = false) {
     if (!session.active || job.generation !== session.generation) return;
     if (!job.el.isConnected) return;
     const state = elementStates.get(job.el);
-    if (!state || state.generation !== job.generation) return;
+    if (!state || state !== job.state || state.generation !== job.generation) return;
     if (state.results[job.partIndex] !== undefined) return;
 
-    const currentText = getSourceText(job.el);
+    const currentText = snapshot === undefined ? getSourceText(job.el) : snapshot;
     if (currentText !== state.text) {
       removeTranslationNode(state.translationEl);
       elementStates.delete(job.el);
+      session.elements.delete(job.el);
+      observed.delete(job.el);
       if (bumpChangeGuard(job.el)) {
         enqueueElement(job.el);
       } else {
+        state.status = 'paused';
+        session.failedElements.add(job.el);
         reportStatus({ kind: 'error', message: '页面内容频繁变化，已暂停自动重译此段' });
         syncUi();
       }
@@ -1593,11 +1847,12 @@
     }
 
     state.results[job.partIndex] = translation;
+    state.providers[job.partIndex] = providerName;
     state.pending = Math.max(0, state.pending - 1);
     lastProvider = providerName || lastProvider;
     session.stats.done += 1;
-    cacheSet(settings.targetLang, job.text, translation);
-    finalizeElementIfReady(job.el, state);
+    cacheSet(state.targetLang, job.text, translation, providerName, state.scope);
+    finalizeElementIfReady(job.el, state, deferRender);
     pushStatusProgress();
   }
 
@@ -1606,7 +1861,7 @@
       if (!session.active || job.generation !== session.generation) return false;
       if (!job.el.isConnected) return false;
       const state = elementStates.get(job.el);
-      if (!state || state.generation !== job.generation) return false;
+      if (!state || state !== job.state || state.generation !== job.generation) return false;
       if (state.results[job.partIndex] !== undefined) return false;
       if (state.failedParts.has(job.partIndex)) return false;
       return true;
@@ -1659,75 +1914,100 @@
   }
 
   async function processBatch(batch) {
-    const uniqueTexts = batch.texts;
-    let result;
-    try {
-      result = await translateTexts(uniqueTexts, settings.targetLang);
-    } catch (err) {
-      if (!session.active) return;
-      if (isAbortError(err)) return;
-      if (err.kind === 'cooldown') {
-        for (const job of batch.jobs) {
-          const state = elementStates.get(job.el);
-          if (state) state.status = 'queued';
-        }
-        session.queue.unshift(...batch.jobs);
-        reportStatus({ kind: 'error', message: err.message || '接口冷却中，稍后重试' });
-        syncUi();
-        schedulePump(15000);
-        return;
+    const generation = batch.jobs[0].generation;
+    const targetLang = batch.jobs[0].state.targetLang;
+    const scope = batch.jobs[0].state.scope;
+    const signal = session.controller.signal;
+    const pendingMap = session.pendingTexts;
+    const owners = [];
+    const promises = batch.texts.map(text => {
+      const cached = cacheGet(targetLang, text, scope);
+      if (cached) return Promise.resolve(cached);
+      const key = cacheKey(targetLang, text, scope);
+      let entry = pendingMap.get(key);
+      if (!entry) {
+        entry = { text, key };
+        entry.promise = new Promise((resolve, reject) => { entry.resolve = resolve; entry.reject = reject; });
+        pendingMap.set(key, entry);
+        owners.push(entry);
       }
-      for (const job of batch.jobs) markJobFailed(job, err);
-      reportStatus({
-        kind: 'error',
-        message: `翻译失败：${err && err.message ? err.message : '未知错误'}`,
-      });
-      pushStatusProgress();
-      return;
-    }
-
-    if (!session.active) return;
-    const map = new Map();
-    uniqueTexts.forEach((text, index) => {
-      map.set(text, result.translations[index]);
+      return entry.promise;
     });
-    for (const job of batch.jobs) {
-      const translation = map.get(job.text);
-      if (typeof translation === 'string' && translation.trim()) {
-        applyJobResult(job, translation.trim(), result.provider);
-      } else {
-        markJobFailed(job, new ProviderError('接口返回空译文', 'protocol'));
-      }
+    if (owners.length) {
+      translateTexts(owners.map(entry => entry.text), targetLang, 'page', { signal })
+        .then(result => {
+          owners.forEach((entry, index) => entry.resolve({
+            translation: result.translations[index], provider: result.provider,
+          }));
+        }, error => owners.forEach(entry => entry.reject(error)))
+        .finally(() => {
+          for (const entry of owners) if (pendingMap.get(entry.key) === entry) pendingMap.delete(entry.key);
+        });
     }
-    lastProvider = result.provider || lastProvider;
+    const outcomes = await Promise.allSettled(promises);
+    if (!session.active || signal.aborted || generation !== session.generation) return;
+    const indexed = new Map(batch.texts.map((text, index) => [text, outcomes[index]]));
+    const snapshots = new Map();
+    const render = new Set();
+    // Read source/layout once per element before any of this batch's DOM writes.
+    for (const job of batch.jobs) {
+      const state = elementStates.get(job.el);
+      if (state !== job.state || !job.el.isConnected || snapshots.has(job.el)) continue;
+      snapshots.set(job.el, getSourceText(job.el));
+      state.layout = readElementLayout(job.el);
+    }
+    let cooling = false;
+    withMutationPaused(() => {
+      for (const job of batch.jobs) {
+        const outcome = indexed.get(job.text);
+        if (outcome.status === 'fulfilled') {
+          const result = outcome.value;
+          if (typeof result.translation === 'string' && result.translation.trim()) {
+            applyJobResult(job, result.translation.trim(), result.provider, snapshots.get(job.el), true);
+            render.add(job.el);
+          } else markJobFailed(job, new ProviderError('接口返回空译文', 'protocol'), true);
+        } else if (!isAbortError(outcome.reason)) {
+          if (outcome.reason.kind === 'cooldown' && elementStates.get(job.el) === job.state) {
+            job.state.status = 'queued';
+            session.queue.push(job);
+            cooling = true;
+          } else {
+            markJobFailed(job, outcome.reason, true);
+            render.add(job.el);
+          }
+        }
+      }
+      for (const el of render) {
+        const state = elementStates.get(el);
+        if (state && state.pending === 0 && el.isConnected) renderElement(el, state);
+      }
+    });
+    if (cooling) schedulePump(15000);
     pushStatusProgress();
   }
 
-  async function pump() {
-    if (!session.active || session.busy) return;
-    if (!document.hidden && !session.queue.length) {
-      pushStatusProgress();
-      return;
-    }
-    if (document.hidden) return;
-
-    session.busy = true;
-    try {
-      while (session.active) {
-        pruneQueue();
-        if (!session.queue.length) break;
-        if (document.hidden) break;
-        const batch = pickBatch();
-        if (!batch) break;
-        await processBatch(batch);
-      }
-    } finally {
-      session.busy = false;
-      if (session.active) {
+  function pump() {
+    if (!session.active || document.hidden) return;
+    pruneQueue();
+    while (session.active && session.inFlight < PAGE_CONCURRENCY && session.queue.length) {
+      const batch = pickBatch();
+      if (!batch) break;
+      const generation = session.generation;
+      session.inFlight += 1;
+      session.busy = true;
+      processBatch(batch).catch(error => {
+        if (generation !== session.generation || !session.active || isAbortError(error)) return;
+        for (const job of batch.jobs) markJobFailed(job, error);
+        reportStatus({ kind: 'error', message: '翻译失败：' + error.message });
+      }).finally(() => {
+        if (generation !== session.generation) return;
+        session.inFlight = Math.max(0, session.inFlight - 1);
+        session.busy = session.inFlight > 0;
         pushStatusProgress();
-        if (session.queue.length) schedulePump(0);
-      }
+        if (session.active && session.queue.length) schedulePump(0);
+      });
     }
+    pushStatusProgress();
   }
 
   function retryFailed() {
@@ -1762,6 +2042,7 @@
     }
     session.active = true;
     session.generation += 1;
+    session.controller = new AbortController();
     resetSessionState();
     session.queue = [];
     lastProvider = '';
@@ -1786,6 +2067,8 @@
     if (!session.active) return;
     session.active = false;
     session.generation += 1;
+    if (session.controller) session.controller.abort();
+    session.controller = null;
     session.queue = [];
     abortPageRequests();
     stopUrlWatcher();
@@ -1820,6 +2103,8 @@
   function restartTranslation() {
     if (!session.active) return;
     session.generation += 1;
+    if (session.controller) session.controller.abort();
+    session.controller = new AbortController();
     session.queue = [];
     abortPageRequests();
     if (session.retryTimer) {
@@ -2137,7 +2422,10 @@ details.more[open] summary { margin-bottom: 8px; }
       'border: 0 !important',
       'z-index: 2147483646 !important',
     ].join(';');
-    const shadow = host.attachShadow({ mode: 'open' });
+    // Keep the settings UI isolated from page scripts. The returned reference
+    // remains available to PageLingo, while `host.shadowRoot` stays inaccessible
+    // to the page and cannot expose the user's DeepL key through DOM inspection.
+    const shadow = host.attachShadow({ mode: 'closed' });
     const providerOptions = PROVIDER_OPTIONS.map(
       (item) => `<option value="${item.value}">${item.label}</option>`
     ).join('');
@@ -2181,9 +2469,12 @@ details.more[open] summary { margin-bottom: 8px; }
   <details class="more" data-role="deepl-box">
     <summary>DeepL 高质量接口（可选）</summary>
     <label class="field">DeepL API Key
-      <input type="password" data-field="deeplKey" autocomplete="off" spellcheck="false" placeholder="以 :fx 结尾的免费版 Key">
+      <input type="password" data-field="deeplKey" autocomplete="off" spellcheck="false" placeholder="输入新的 :fx 免费版 Key">
     </label>
-    <p class="hint">免费版每月约 50 万字符；Key 只保存在脚本管理器本地，不会发送到其他服务。</p>
+    <div class="mini-actions">
+      <button class="mini-btn" type="button" data-action="clear-deepl">清除已保存 Key</button>
+    </div>
+    <p class="hint" data-role="deepl-state">免费版每月约 50 万字符；Key 只保存在脚本管理器本地，不会发送到其他服务。</p>
   </details>
   <details class="more">
     <summary>快捷键与维护</summary>
@@ -2238,6 +2529,8 @@ details.more[open] summary { margin-bottom: 8px; }
       translationOnly: shadow.querySelector('[data-field="translationOnly"]'),
       deeplBox: shadow.querySelector('[data-role="deepl-box"]'),
       deeplKey: shadow.querySelector('[data-field="deeplKey"]'),
+      clearDeepL: shadow.querySelector('[data-action="clear-deepl"]'),
+      deeplState: shadow.querySelector('[data-role="deepl-state"]'),
       selection: shadow.querySelector('[data-field="selection"]'),
       siteAuto: shadow.querySelector('[data-field="siteAuto"]'),
       siteDisabled: shadow.querySelector('[data-field="siteDisabled"]'),
@@ -2363,6 +2656,7 @@ details.more[open] summary { margin-bottom: 8px; }
 
     ui.deeplKey.addEventListener('change', applyDeepLKey);
     ui.deeplKey.addEventListener('blur', applyDeepLKey);
+    ui.clearDeepL.addEventListener('click', clearDeepLKey);
 
     ui.selection.addEventListener('change', () => {
       settings.selection = ui.selection.checked;
@@ -2465,7 +2759,13 @@ details.more[open] summary { margin-bottom: 8px; }
     ui.allowLowQuality.checked = settings.allowLowQuality;
     ui.fullPage.checked = settings.fullPage;
     ui.translationOnly.checked = settings.translationOnly;
-    ui.deeplKey.value = settings.deeplKey;
+    ui.deeplKey.value = '';
+    ui.deeplKey.placeholder = settings.deeplKey
+      ? '已配置（输入新的 :fx Key 可替换）'
+      : '输入新的 :fx 免费版 Key';
+    ui.deeplState.textContent = settings.deeplKey
+      ? 'DeepL Key 已配置；为保护安全，已保存 Key 不会回填到网页。'
+      : '免费版每月约 50 万字符；Key 只保存在脚本管理器本地，不会发送到其他服务。';
     ui.selection.checked = settings.selection;
     const site = getSiteSettings();
     ui.siteAuto.checked = !!site.auto;
@@ -2633,6 +2933,13 @@ details.more[open] summary { margin-bottom: 8px; }
   function applyDeepLKey() {
     if (!ui) return;
     const value = ui.deeplKey.value.trim();
+    if (!value) return;
+    if (!value.endsWith(':fx')) {
+      ui.deeplKey.value = '';
+      reportStatus({ kind: 'error', message: '只接受以 :fx 结尾的 DeepL 免费版 Key' });
+      syncUi();
+      return;
+    }
     if (value === settings.deeplKey) return;
     settings.deeplKey = value;
     providerStates.deepl = createProviderState();
@@ -2644,6 +2951,16 @@ details.more[open] summary { margin-bottom: 8px; }
         : 'DeepL Key 已清除',
     });
     if (session.active) schedulePump(0);
+    syncUi();
+  }
+
+  function clearDeepLKey() {
+    if (!settings.deeplKey) return;
+    settings.deeplKey = '';
+    providerStates.deepl = createProviderState();
+    saveSettings();
+    if (ui) ui.deeplKey.value = '';
+    reportStatus({ kind: 'idle', message: 'DeepL Key 已清除' });
     syncUi();
   }
 
@@ -2762,9 +3079,10 @@ details.more[open] summary { margin-bottom: 8px; }
 
     const token = ++selectionToken;
     const text = selectionText;
-    const cached = cacheGet(settings.targetLang, text);
+    const selectionScope = cacheScope();
+    const cached = cacheGet(settings.targetLang, text, selectionScope);
     if (cached) {
-      showSelectionResult(cached, '缓存', token);
+      showSelectionResult(cached.translation, cached.provider ? providerLabel(cached.provider) : '缓存', token);
       return;
     }
 
@@ -2773,7 +3091,7 @@ details.more[open] summary { margin-bottom: 8px; }
         if (token !== selectionToken) return;
         const translation = result.translations[0];
         if (!translation) throw new Error('译文为空');
-        cacheSet(settings.targetLang, text, translation);
+        cacheSet(settings.targetLang, text, translation, result.provider, selectionScope);
         showSelectionResult(translation, providerLabel(result.provider), token);
       })
       .catch((err) => {
