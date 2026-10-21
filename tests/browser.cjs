@@ -36,7 +36,7 @@ function paragraphs(count, extra = '') {
   ).join('') + '</main>';
 }
 
-async function fixture(browser, html, { settings = {}, mock = {}, source, viewport } = {}) {
+async function fixture(browser, html, { settings = {}, mock = {}, source, viewport, storage = {} } = {}) {
   const page = await browser.newPage({ viewport: viewport || { width: 1280, height: 900 } });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -45,62 +45,85 @@ async function fixture(browser, html, { settings = {}, mock = {}, source, viewpo
       '<!doctype html><html><head><meta charset="utf-8"></head><body>' + html + '</body></html>' })
     : route.abort());
   await page.goto('http://pagelingo.test/test');
-  await page.evaluate(({ settings, mock }) => {
-    window.__calls = [];
-    window.__writes = [];
-    window.__storage = JSON.stringify({
-      schemaVersion: 4, provider: 'microsoft', targetLang: 'zh-CN', autoFallback: false, ...settings,
+  const boot = async stored => {
+    await page.evaluate(({ settings, mock, stored }) => {
+      window.__calls = [];
+      window.__writes = [];
+      window.__store = { 'et:settings:v1': JSON.stringify({
+        schemaVersion: 4, provider: 'microsoft', targetLang: 'zh-CN', autoFallback: false, ...settings,
+      }), ...stored };
+      window.GM_getValue = mock.noGMStorage ? undefined : (key, fallback) => window.__store[key] ?? fallback;
+      window.GM_setValue = mock.noGMStorage ? undefined : (key, value) => {
+        window.__store[key] = value; window.__writes.push({ key, value });
+      };
+      window.GM_deleteValue = mock.noGMStorage ? undefined : key => { delete window.__store[key]; };
+      window.GM_registerMenuCommand = () => {};
+      window.GM_setClipboard = () => {};
+      window.GM_xmlhttpRequest = options => {
+        const url = new URL(options.url);
+        const provider = url.hostname.includes('deepl') ? 'deepl' : url.hostname.includes('google') ? 'google'
+          : url.hostname.includes('mymemory') ? 'mymemory' : 'microsoft';
+        const body = options.data && provider !== 'google' ? JSON.parse(options.data) : null;
+        const texts = provider === 'microsoft' ? body : provider === 'deepl' ? body.text
+          : provider === 'google' && options.method === 'POST' ? new URLSearchParams(options.data).getAll('q')
+          : [url.searchParams.get('q')];
+        const target = provider === 'microsoft' ? url.searchParams.get('to')
+          : provider === 'deepl' ? body.target_lang : url.searchParams.get(provider === 'google' ? 'tl' : 'langpair');
+        const index = window.__calls.length;
+        const entry = { provider, texts, target, method: options.method, url: options.url,
+          at: performance.now(), endedAt: null, aborted: false };
+        window.__calls.push(entry);
+        const timer = setTimeout(() => {
+          entry.endedAt = performance.now();
+          if ((mock.networkErrorFirst && index === 0) || (mock.microsoftNetworkError && provider === 'microsoft')) {
+            return options.onerror({ status: 0 });
+          }
+          let status = mock.statuses?.[index] || 200;
+          if (mock.microsoftDenied && provider === 'microsoft') status = 403;
+          if (mock.rejectLarge && texts.length > 32) status = 413;
+          if (provider === 'deepl' && texts.length > 50) status = 400;
+          if (status !== 200) return options.onload({ status, responseText: '', responseHeaders: mock.headers || '' });
+          const translate = text => `${provider}/${target}::${text}`;
+          let response = provider === 'microsoft' ? texts.map(text => ({ translations: [{ text: translate(text) }] }))
+            : provider === 'deepl' ? { translations: texts.map(text => ({ text: translate(text) })) }
+            : provider === 'google' ? url.pathname.endsWith('/t')
+              ? texts.map(text => mock.googleStringArray ? translate(text) : [translate(text), 'en'])
+              : { sentences: [{ trans: translate(texts[0]) }] }
+            : { responseStatus: 200, responseData: { translatedText: translate(texts[0]) } };
+          if (provider === 'google' && mock.googleBadCount) response = [];
+          if (provider === 'google' && mock.googleEmptyItem) response = texts.map(() => ['', 'en']);
+          if (provider === 'google' && mock.googleLiteralHtml) response = texts.map(() => ['<img src=x onerror="alert(1)">', 'en']);
+          options.onload({ status: 200, responseText: JSON.stringify(response), responseHeaders: '' });
+        }, mock.delays?.[index] ?? mock.providerLatencies?.[provider] ?? mock.latencyMs ?? 30);
+        return { abort() {
+          if (entry.endedAt !== null) return;
+          entry.aborted = true;
+          entry.endedAt = performance.now();
+          clearTimeout(timer);
+          options.onabort();
+        } };
+      };
+      window.__renders = [];
+      window.__renderObserver = new MutationObserver(records => {
+        if (records.some(record => Array.from(record.addedNodes).some(node =>
+          node.nodeType === 1 && (node.matches('.et-translation') || node.querySelector('.et-translation'))))) {
+          window.__renders.push({ at: performance.now(), count: document.querySelectorAll('.et-translation').length });
+        }
+      });
+      window.__renderObserver.observe(document.body, { childList: true, subtree: true });
+    }, { settings, mock, stored });
+    await page.addScriptTag({ content: instrument(source || fs.readFileSync(scriptPath, 'utf8')) });
+  };
+  await boot(storage);
+  return { page, errors, reload: async transform => {
+    let stored = await page.evaluate(() => {
+      window.dispatchEvent(new PageTransitionEvent('pagehide'));
+      return window.__store;
     });
-    window.GM_getValue = () => window.__storage;
-    window.GM_setValue = (key, value) => { window.__storage = value; window.__writes.push({ key, value }); };
-    window.GM_deleteValue = () => {};
-    window.GM_registerMenuCommand = () => {};
-    window.GM_setClipboard = () => {};
-    window.GM_xmlhttpRequest = options => {
-      const url = new URL(options.url);
-      const provider = url.hostname.includes('deepl') ? 'deepl' : url.hostname.includes('google') ? 'google'
-        : url.hostname.includes('mymemory') ? 'mymemory' : 'microsoft';
-      const body = options.data ? JSON.parse(options.data) : null;
-      const texts = provider === 'microsoft' ? body : provider === 'deepl' ? body.text : [url.searchParams.get('q')];
-      const target = provider === 'microsoft' ? url.searchParams.get('to')
-        : provider === 'deepl' ? body.target_lang : url.searchParams.get(provider === 'google' ? 'tl' : 'langpair');
-      const index = window.__calls.length;
-      const entry = { provider, texts, target, at: performance.now(), endedAt: null, aborted: false };
-      window.__calls.push(entry);
-      const timer = setTimeout(() => {
-        entry.endedAt = performance.now();
-        if (mock.networkErrorFirst && index === 0) return options.onerror({ status: 0 });
-        let status = mock.statuses?.[index] || 200;
-        if (mock.microsoftDenied && provider === 'microsoft') status = 403;
-        if (mock.rejectLarge && texts.length > 32) status = 413;
-        if (provider === 'deepl' && texts.length > 50) status = 400;
-        if (status !== 200) return options.onload({ status, responseText: '', responseHeaders: mock.headers || '' });
-        const translate = text => `${provider}/${target}::${text}`;
-        const response = provider === 'microsoft' ? texts.map(text => ({ translations: [{ text: translate(text) }] }))
-          : provider === 'deepl' ? { translations: texts.map(text => ({ text: translate(text) })) }
-          : provider === 'google' ? { sentences: [{ trans: translate(texts[0]) }] }
-          : { responseStatus: 200, responseData: { translatedText: translate(texts[0]) } };
-        options.onload({ status: 200, responseText: JSON.stringify(response), responseHeaders: '' });
-      }, mock.delays?.[index] ?? mock.latencyMs ?? 30);
-      return { abort() {
-        if (entry.endedAt !== null) return;
-        entry.aborted = true;
-        entry.endedAt = performance.now();
-        clearTimeout(timer);
-        options.onabort();
-      } };
-    };
-    window.__renders = [];
-    window.__renderObserver = new MutationObserver(records => {
-      if (records.some(record => Array.from(record.addedNodes).some(node =>
-        node.nodeType === 1 && (node.matches('.et-translation') || node.querySelector('.et-translation'))))) {
-        window.__renders.push({ at: performance.now(), count: document.querySelectorAll('.et-translation').length });
-      }
-    });
-    window.__renderObserver.observe(document.body, { childList: true, subtree: true });
-  }, { settings, mock });
-  await page.addScriptTag({ content: instrument(source || fs.readFileSync(scriptPath, 'utf8')) });
-  return { page, errors };
+    if (transform) stored = await transform(stored);
+    await page.reload();
+    await boot(stored);
+  } };
 }
 
 async function idle(page, expected, timeout = 10000) {

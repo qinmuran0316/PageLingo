@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PageLingo — 双语网页翻译
 // @namespace    https://github.com/qinmuran0316/PageLingo
-// @version      0.6.0
+// @version      0.7.0
 // @description  PageLingo：用微软 / DeepL / Google / MyMemory 翻译网页，支持双语对照、仅译文、划词翻译和快捷键
 // @author       qinmuran0316
 // @license      MIT
@@ -33,10 +33,13 @@
   if (window.__EDGE_TRANSLATOR_LOADED__) return;
   window.__EDGE_TRANSLATOR_LOADED__ = true;
 
-  const VERSION = '0.6.0';
+  const VERSION = '0.7.0';
   const HOST_ID = 'et-translator-host';
   const STYLE_ID = 'et-page-style';
   const SETTINGS_KEY = 'et:settings:v1';
+  const CACHE_STORAGE_KEY = 'et:cache:v1';
+  const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  const AUTO_HEDGE_DELAY_MS = 450;
   const REQUEST_TIMEOUT = 10000;
   const PROVIDER_GAP = 250;
   const PAGE_CONCURRENCY = 2;
@@ -49,7 +52,7 @@
   const PROVIDER_BATCH_LIMITS = {
     microsoft: { items: 128, chars: 24000 },
     deepl: { items: 50, chars: 24000 },
-    google: { items: 1, chars: 1800 },
+    google: { items: 128, chars: 24000 },
     mymemory: { items: 1, chars: 1800 },
   };
   const CACHE_MAX_ITEMS = 1000;
@@ -71,10 +74,10 @@
     ko: { label: '한국어', microsoft: 'ko', deepl: 'KO', google: 'ko', mymemory: 'ko' },
   };
   const PROVIDER_OPTIONS = [
-    { value: 'auto', label: '自动选择' },
+    { value: 'auto', label: '自动择快（推荐）' },
     { value: 'microsoft', label: '微软（免费推荐）' },
     { value: 'deepl', label: 'DeepL（需 Key）' },
-    { value: 'google', label: 'Google' },
+    { value: 'google', label: 'Google（整页批量）' },
     { value: 'mymemory', label: 'MyMemory（质量较低）' },
   ];
 
@@ -153,6 +156,8 @@
     selection: true,
     fullPage: false,
     translationOnly: false,
+    showOriginal: true,
+    persistentCache: true,
     deeplKey: '',
     shortcuts: { toggle: 'Alt+T', panel: 'Alt+O' },
     position: null,
@@ -573,6 +578,8 @@
     merged.allowLowQuality = merged.allowLowQuality === true;
     merged.fullPage = merged.fullPage === true;
     merged.translationOnly = merged.translationOnly === true;
+    merged.showOriginal = merged.showOriginal !== false;
+    merged.persistentCache = merged.persistentCache !== false;
     merged.deeplKey = typeof merged.deeplKey === 'string' && merged.deeplKey.trim().endsWith(':fx')
       ? merged.deeplKey.trim() : '';
     return merged;
@@ -600,14 +607,15 @@
   }
 
   // ---------------------------------------------------------------------------
-  // 缓存：内存 LRU，隔离接口策略、目标语言与协议版本
+  // 缓存：内存 LRU 与脚本管理器本地缓存，隔离接口、站点、语言与协议
   // ---------------------------------------------------------------------------
 
   const cache = new Map();
   let cacheBytes = 0;
+  let cacheWriteTimer = 0;
 
   function cacheScope() {
-    return JSON.stringify([2, location.origin, settings.provider,
+    return JSON.stringify([3, location.origin, settings.provider,
       settings.autoFallback, settings.allowLowQuality,
       settings.deeplKey ? settings.deeplKey.slice(-8) : '']);
   }
@@ -620,6 +628,11 @@
     const key = cacheKey(targetLang, text, scope);
     const value = cache.get(key);
     if (value === undefined) return null;
+    if (value.expiresAt <= Date.now()) {
+      cacheBytes -= value.bytes;
+      cache.delete(key);
+      return null;
+    }
     cache.delete(key);
     cache.set(key, value);
     return value;
@@ -633,8 +646,13 @@
       cacheBytes -= cache.get(key).bytes;
       cache.delete(key);
     }
-    cache.set(key, { translation, provider, bytes: size });
+    cache.set(key, { translation, provider, bytes: size, expiresAt: Date.now() + CACHE_TTL_MS });
     cacheBytes += size;
+    trimCache();
+    scheduleCacheSave();
+  }
+
+  function trimCache() {
     while (cache.size > CACHE_MAX_ITEMS || cacheBytes > CACHE_MAX_BYTES) {
       const oldest = cache.keys().next();
       if (oldest.done) break;
@@ -646,8 +664,53 @@
   }
 
   function clearCache() {
+    if (cacheWriteTimer) clearTimeout(cacheWriteTimer);
+    cacheWriteTimer = 0;
     cache.clear();
     cacheBytes = 0;
+    if (typeof GM_deleteValue === 'function') gm.remove(CACHE_STORAGE_KEY);
+    else if (typeof GM_setValue === 'function') gm.set(CACHE_STORAGE_KEY, JSON.stringify({ entries: [] }));
+  }
+
+  function canPersistCache() {
+    return settings.persistentCache && typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
+  }
+
+  function loadPersistentCache() {
+    if (!canPersistCache()) return;
+    try {
+      const stored = gm.get(CACHE_STORAGE_KEY, null);
+      if (typeof stored !== 'string' || stored.length > CACHE_MAX_BYTES * 3) return;
+      const parsed = JSON.parse(stored);
+      if (!Array.isArray(parsed.entries)) return;
+      for (const entry of parsed.entries.slice(-CACHE_MAX_ITEMS)) {
+        if (!Array.isArray(entry) || entry.length !== 4) continue;
+        const [key, translation, provider, expiresAt] = entry;
+        if (typeof key !== 'string' || typeof translation !== 'string' || !translation.trim() ||
+          !PROVIDER_LABELS[provider] || !Number.isFinite(expiresAt) || expiresAt <= Date.now() ||
+          expiresAt > Date.now() + CACHE_TTL_MS) continue;
+        const bytes = (key.length + translation.length) * 2 + 80;
+        if (bytes > CACHE_MAX_BYTES) continue;
+        if (cache.has(key)) cacheBytes -= cache.get(key).bytes;
+        cache.set(key, { translation, provider, bytes, expiresAt });
+        cacheBytes += bytes;
+      }
+      trimCache();
+    } catch (err) { logWarn('读取译文缓存失败', err); }
+  }
+
+  function scheduleCacheSave() {
+    if (!canPersistCache() || cacheWriteTimer) return;
+    cacheWriteTimer = setTimeout(flushPersistentCache, 800);
+  }
+
+  function flushPersistentCache() {
+    if (cacheWriteTimer) clearTimeout(cacheWriteTimer);
+    cacheWriteTimer = 0;
+    if (!canPersistCache()) return;
+    const entries = Array.from(cache).filter(([, value]) => value.expiresAt > Date.now())
+      .map(([key, value]) => [key, value.translation, value.provider, value.expiresAt]);
+    gm.set(CACHE_STORAGE_KEY, JSON.stringify({ entries }));
   }
 
   // ---------------------------------------------------------------------------
@@ -660,6 +723,7 @@
     google: createProviderState(),
     mymemory: createProviderState(),
   };
+  let preferredAutoProvider = 'microsoft';
 
   function createProviderState() {
     return {
@@ -690,10 +754,10 @@
 
   function getProviderOrder() {
     if (settings.provider === 'auto') {
-      const order = ['microsoft'];
+      const order = [preferredAutoProvider];
       if (!settings.autoFallback) return order;
+      order.push(preferredAutoProvider === 'google' ? 'microsoft' : 'google');
       if (settings.deeplKey) order.push('deepl');
-      order.push('google');
       if (settings.allowLowQuality) order.push('mymemory');
       return order;
     }
@@ -818,41 +882,27 @@
   }
 
   async function googleTranslate(texts, targetLang, context) {
-    return mapConcurrent(texts, 2, async (text) => {
-      // 600 UTF-16 units keep even a fully escaped CJK URL comfortably short.
-      const chunks = splitText(text, 600);
-      let joined = '';
-      for (const chunk of chunks) {
-        throwIfAborted(context.signal);
-        const url =
-          'https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=' +
-          encodeURIComponent(TARGETS[targetLang].google) +
-          '&dt=t&dj=1&ie=UTF-8&q=' +
-          encodeURIComponent(chunk);
-        if (url.length > 7800) {
-          throw new ProviderError('Google 请求 URL 过长', 'protocol');
-        }
-        const response = await providerRequest('google', { method: 'GET', url }, context);
-        let data;
-        try {
-          data = JSON.parse(response.text);
-        } catch (err) {
-          throw new ProviderError('Google 接口返回了无法解析的数据', 'protocol');
-        }
-        if (!data || !Array.isArray(data.sentences)) {
-          throw new ProviderError('Google 接口返回格式异常', 'protocol');
-        }
-        const translation = data.sentences
-          .map((item) => (item && typeof item.trans === 'string' ? item.trans : ''))
-          .join('')
-          .trim();
-        if (!translation) {
-          throw new ProviderError('Google 返回了空译文', 'protocol');
-        }
-        joined += (joined ? ' ' : '') + translation;
+    // Repeated q fields preserve paragraph boundaries without HTML markers.
+    const response = await providerRequest('google', {
+      method: 'POST',
+      url: 'https://translate.googleapis.com/translate_a/t?client=gtx&sl=auto&tl=' +
+        encodeURIComponent(TARGETS[targetLang].google),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+      data: texts.map(text => 'q=' + encodeURIComponent(text)).join('&'),
+    }, context);
+    let data;
+    try { data = JSON.parse(response.text); }
+    catch (err) { throw new ProviderError('Google 接口返回了无法解析的数据', 'protocol'); }
+    if (!Array.isArray(data) || data.length !== texts.length) {
+      throw new ProviderError('Google 接口返回数量不一致', 'protocol');
+    }
+    return data.map((item, index) => {
+      const translation = typeof item === 'string' ? item : Array.isArray(item) ? item[0] : null;
+      if (typeof translation !== 'string' || !translation.trim()) {
+        throw new ProviderError(`Google 接口第 ${index + 1} 段译文为空或格式异常`, 'protocol');
       }
-      return joined;
-    }, context.signal);
+      return translation.trim();
+    });
   }
 
   async function deeplTranslate(texts, targetLang, context) {
@@ -930,6 +980,9 @@
 
   async function requestWithRetry(name, texts, targetLang, budget, context) {
     let lastError = null;
+    const attempts = context.attempts || 2;
+    // A size rejection may still use the second slot to shrink the payload,
+    // even when automatic routing skips ordinary retries on a failing line.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       throwIfAborted(context.signal);
       if (budget.remaining <= 0) break;
@@ -961,7 +1014,7 @@
           err.kind === 'environment' ||
           err.kind === 'cooldown' ||
           (err.kind === 'http' && err.status < 500 && err.status !== 408) ||
-          attempt === 1 ||
+          attempt >= attempts - 1 ||
           budget.remaining <= 0
         ) {
           throw err;
@@ -972,6 +1025,52 @@
       }
     }
     throw lastError || new ProviderError('翻译请求尝试次数已用完', 'budget');
+  }
+
+  function raceFreeProviders(names, texts, targetLang, budget, context) {
+    return new Promise((resolve, reject) => {
+      let timer = 0;
+      let next = 0;
+      let pending = 0;
+      let settled = false;
+      let lastError;
+      const requests = [];
+      const finish = (result, error) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        for (const request of requests) {
+          request.controller.abort();
+          request.release();
+        }
+        if (error) reject(error);
+        else {
+          preferredAutoProvider = result.provider;
+          resolve(result);
+        }
+      };
+      const launch = () => {
+        if (settled || next >= names.length) return;
+        if (context.signal && context.signal.aborted) { finish(null, abortError()); return; }
+        const name = names[next++];
+        const request = linkedController(context.signal);
+        requests.push(request);
+        pending += 1;
+        requestWithRetry(name, texts, targetLang, budget,
+          { ...context, signal: request.controller.signal, attempts: 1 })
+          .then(translations => finish({ translations, provider: name }), error => {
+            pending -= 1;
+            if (settled) return;
+            if (isAbortError(error)) { finish(null, error); return; }
+            lastError = error;
+            if (timer) { clearTimeout(timer); timer = 0; }
+            if (next < names.length) launch();
+            else if (!pending) finish(null, lastError);
+          });
+      };
+      launch();
+      if (!settled && next < names.length) timer = setTimeout(launch, AUTO_HEDGE_DELAY_MS);
+    });
   }
 
   async function translateTexts(texts, targetLang, purpose = 'page', options = {}) {
@@ -991,8 +1090,28 @@
       const budget = { remaining: 3 };
       let lastError = null;
 
+      // Only keyless services participate in speculative work. DeepL is used
+      // after failures or when explicitly selected, never as a racing probe.
+      const raced = new Set();
+      if (settings.provider === 'auto' && allowFallback) {
+        const names = order.filter(name => (name === 'microsoft' || name === 'google') && !isCooling(name));
+        if (names.length === 2) {
+          names.forEach(name => raced.add(name));
+          try {
+            const result = await raceFreeProviders(names, clean, targetLang, budget, context);
+            throwIfAborted(context.signal);
+            reportStatus({ provider: result.provider, message: `正在使用 ${providerLabel(result.provider)}`, kind: 'working' });
+            return result;
+          } catch (err) {
+            if (isAbortError(err)) throw err;
+            lastError = err;
+          }
+        }
+      }
+
       for (const name of order) {
         throwIfAborted(context.signal);
+        if (raced.has(name)) continue;
         if (budget.remaining <= 0) break;
         if (isCooling(name)) {
           lastError = new ProviderError(cooldownMessage(name), 'cooldown');
@@ -1916,9 +2035,31 @@
     if (!node) return;
     node.textContent = values.join(' ');
     node.dataset.state = state.status === 'failed' ? 'error' : state.pending > 0 ? 'loading' : 'done';
+    updateTranslationTitle(node, state);
+  }
+
+  function updateTranslationTitle(node, state) {
     const providers = Array.from(new Set(state.providers.filter(Boolean)));
-    node.title = '机器翻译' + (providers.length ? ' · ' + providers.map(providerLabel).join(' / ') : '');
+    node.title = settings.showOriginal ? state.text
+      : '机器翻译' + (providers.length ? ' · ' + providers.map(providerLabel).join(' / ') : '');
     if (providers.length) node.dataset.provider = providers.join(',');
+  }
+
+  function updateTranslationDisplay() {
+    withMutationPaused(() => {
+      for (const el of session.elements) {
+        const state = elementStates.get(el);
+        const node = state && state.translationEl;
+        if (!el.isConnected || !node || !node.isConnected) continue;
+        if (settings.translationOnly) node.__etSourceWrapper = wrapSourceContent(el);
+        else if (node.__etSourceWrapper) {
+          unwrapSourceWrapper(node.__etSourceWrapper);
+          node.__etSourceWrapper = null;
+        }
+        node.dataset.mode = settings.translationOnly ? 'only' : 'bilingual';
+        updateTranslationTitle(node, state);
+      }
+    });
   }
 
   function finalizeElementIfReady(el, state, deferRender = false) {
@@ -2326,6 +2467,7 @@
   }
 
   document.addEventListener('visibilitychange', () => {
+    if (document.hidden) flushPersistentCache();
     if (!document.hidden && session.active) {
       if (session.scanJobs.length && !session.scanHandle) {
         session.scanHandle = postScanTask(runScanSlice);
@@ -2337,6 +2479,7 @@
   });
 
   window.addEventListener('pagehide', () => {
+    flushPersistentCache();
     abortPageRequests();
     if (session.io) session.io.disconnect();
   });
@@ -2637,7 +2780,7 @@ details.more[open] summary { margin-bottom: 8px; }
 
     shadow.innerHTML = `
 <style>${UI_CSS}</style>
-<button class="fab" type="button" data-state="off" aria-label="PageLingo 网页翻译" aria-expanded="false">
+<button class="fab" type="button" data-state="off" aria-label="翻译或恢复原文，右键打开设置" aria-expanded="false">
   <span class="glyph">译</span><span class="dot"></span>
 </button>
 <section class="panel" role="dialog" aria-label="PageLingo 双语网页翻译设置" hidden>
@@ -2664,6 +2807,8 @@ details.more[open] summary { margin-bottom: 8px; }
     <label class="check"><input type="checkbox" data-field="allowLowQuality">允许 MyMemory 低质量兜底</label>
     <label class="check"><input type="checkbox" data-field="fullPage">强制整页（含导航/侧栏）</label>
     <label class="check"><input type="checkbox" data-field="translationOnly">仅显示译文（隐藏原文）</label>
+    <label class="check"><input type="checkbox" data-field="showOriginal">悬停译文显示原文</label>
+    <label class="check"><input type="checkbox" data-field="persistentCache">本地保存译文缓存（7 天）</label>
     <label class="check"><input type="checkbox" data-field="selection">划词翻译</label>
     <label class="check"><input type="checkbox" data-field="siteAuto">本网站自动翻译</label>
     <label class="check"><input type="checkbox" data-field="siteDisabled">禁用本网站</label>
@@ -2695,7 +2840,7 @@ details.more[open] summary { margin-bottom: 8px; }
     </div>
   </details>
   <p class="hint">页面较小时自动整页翻译；页面过大时只翻译当前屏幕，滚动后继续。勾选“强制整页”可跳过此限制。</p>
-  <p class="hint">自动顺序：微软 → DeepL（配置 Key 后）→ Google。MyMemory 默认不参与自动兜底。仅发送需要翻译的文本，不上传整页内容。</p>
+  <p class="hint">单击“译”翻译或恢复，右键打开设置。自动模式在接口较慢时尝试另一条免费线路，采用先完成的结果；DeepL 仅在失败后兜底。只发送需要翻译的文本。</p>
 </section>
 <button class="sel-btn" type="button" hidden aria-label="翻译选中文字">译</button>
 <div class="sel-card" role="dialog" aria-label="划词翻译" hidden>
@@ -2730,6 +2875,8 @@ details.more[open] summary { margin-bottom: 8px; }
       allowLowQuality: shadow.querySelector('[data-field="allowLowQuality"]'),
       fullPage: shadow.querySelector('[data-field="fullPage"]'),
       translationOnly: shadow.querySelector('[data-field="translationOnly"]'),
+      showOriginal: shadow.querySelector('[data-field="showOriginal"]'),
+      persistentCache: shadow.querySelector('[data-field="persistentCache"]'),
       deeplBox: shadow.querySelector('[data-role="deepl-box"]'),
       deeplKey: shadow.querySelector('[data-field="deeplKey"]'),
       clearDeepL: shadow.querySelector('[data-action="clear-deepl"]'),
@@ -2765,8 +2912,9 @@ details.more[open] summary { margin-bottom: 8px; }
     ui.fab.addEventListener('pointerup', onFabPointerUp);
     ui.fab.addEventListener('pointercancel', onFabPointerUp);
     ui.fab.addEventListener('click', (event) => {
-      if (event.detail === 0) togglePanel();
+      if (event.detail === 0) toggleTranslation();
     });
+    ui.fab.addEventListener('contextmenu', event => { event.preventDefault(); openPanel(); });
 
     ui.provider.addEventListener('change', () => {
       const value = ui.provider.value;
@@ -2782,6 +2930,8 @@ details.more[open] summary { margin-bottom: 8px; }
           message: value === 'auto' ? '已切换为自动选择接口' : `已切换接口：${providerLabel(value)}`,
         });
       }
+      closeSelectionUi();
+      if (session.active) restartTranslation();
       syncUi();
     });
 
@@ -2844,10 +2994,11 @@ details.more[open] summary { margin-bottom: 8px; }
         reportStatus({
           kind: 'working',
           message: settings.translationOnly
-            ? '已切换为仅译文模式，正在隐藏原文…'
-            : '已切换为双语模式，正在恢复原文…',
+            ? '已切换为仅译文模式'
+            : '已切换为双语模式',
         });
-        restartTranslation();
+        updateTranslationDisplay();
+        pushStatusProgress();
       } else {
         reportStatus({
           kind: 'idle',
@@ -2855,6 +3006,22 @@ details.more[open] summary { margin-bottom: 8px; }
         });
         syncUi();
       }
+    });
+
+    ui.showOriginal.addEventListener('change', () => {
+      settings.showOriginal = ui.showOriginal.checked;
+      saveSettings();
+      updateTranslationDisplay();
+    });
+
+    ui.persistentCache.addEventListener('change', () => {
+      settings.persistentCache = ui.persistentCache.checked;
+      saveSettings();
+      if (settings.persistentCache) scheduleCacheSave();
+      else clearCache();
+      reportStatus({ kind: session.active ? statusState.kind : 'idle',
+        message: settings.persistentCache ? '已开启本地译文缓存，刷新页面可复用' : '已关闭并清除本地译文缓存' });
+      syncUi();
     });
 
     ui.deeplKey.addEventListener('change', applyDeepLKey);
@@ -2962,6 +3129,8 @@ details.more[open] summary { margin-bottom: 8px; }
     ui.allowLowQuality.checked = settings.allowLowQuality;
     ui.fullPage.checked = settings.fullPage;
     ui.translationOnly.checked = settings.translationOnly;
+    ui.showOriginal.checked = settings.showOriginal;
+    ui.persistentCache.checked = settings.persistentCache;
     ui.deeplKey.value = '';
     ui.deeplKey.placeholder = settings.deeplKey
       ? '已配置（输入新的 :fx Key 可替换）'
@@ -3006,8 +3175,8 @@ details.more[open] summary { margin-bottom: 8px; }
     ui.fab.title = site.disabled
       ? '本网站已禁用，按 ' + settings.shortcuts.panel + ' 打开设置'
       : active
-        ? `恢复原文（${settings.shortcuts.toggle}）`
-        : `翻译网页（${settings.shortcuts.toggle}）`;
+        ? `单击恢复原文（${settings.shortcuts.toggle}）；右键打开设置`
+        : `单击翻译网页（${settings.shortcuts.toggle}）；右键打开设置`;
     ui.retry.disabled = !active || session.failedElements.size === 0;
     ui.siteAuto.checked = !!site.auto;
     ui.siteDisabled.checked = !!site.disabled;
@@ -3124,12 +3293,13 @@ details.more[open] summary { margin-bottom: 8px; }
     const moved = dragState.moved;
     dragState = null;
     try { ui.fab.releasePointerCapture(event.pointerId); } catch (err) { /* ignore */ }
+    if (event.type === 'pointercancel') return;
     if (moved) {
       const rect = ui.fab.getBoundingClientRect();
       settings.position = { left: rect.left, top: rect.top };
       saveSettings();
     } else {
-      togglePanel();
+      toggleTranslation();
     }
   }
 
@@ -3428,6 +3598,7 @@ details.more[open] summary { margin-bottom: 8px; }
   }
 
   function init() {
+    loadPersistentCache();
     injectPageStyle();
     createUi();
     onStatus(() => updateUi());
@@ -3438,7 +3609,7 @@ details.more[open] summary { margin-bottom: 8px; }
     if (!site.disabled && site.auto) {
       window.setTimeout(() => {
         if (!session.active && !document.hidden) startTranslation();
-      }, 600);
+      }, 0);
     }
     if (document.hidden) {
       const startWhenVisible = () => {

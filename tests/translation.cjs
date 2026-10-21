@@ -8,9 +8,10 @@ after(async () => { if (browser) await browser.close(); });
 
 function check(name, html, config, callback) {
   test(name, { timeout: 15000 }, async () => {
-    const { page, errors } = await fixture(browser, html, config);
+    const context = await fixture(browser, html, config);
+    const { page, errors } = context;
     try {
-      await callback(page);
+      await callback(page, context);
       assert.deepEqual(errors, [], 'Browser errors');
     } finally {
       await page.close();
@@ -301,7 +302,6 @@ check('switching providers obtains that provider instead of reusing another cach
   {}, async page => {
     await start(page);
     await change(page, 'provider', 'google');
-    await page.evaluate(() => { window.__TEST.stopTranslation(); window.__TEST.startTranslation(); });
     await idle(page, 1);
     const result = await inspect(page);
     assert.deepEqual(result.calls.map(call => call.provider), ['microsoft', 'google']);
@@ -371,4 +371,250 @@ check('frequently changing content pauses and remains manually retryable', parag
     assert.ok((await inspect(page)).calls.length <= 4);
     await page.evaluate(() => window.__TEST.getUi().retry.click());
     await page.waitForFunction(() => document.querySelector('.et-translation')?.textContent.includes('content 5.'));
+  });
+
+check('Google sends 120 paragraphs in a single POST and displays them together',
+  paragraphs(120), { settings: { provider: 'google' } }, async page => {
+    await start(page, 120);
+    const result = await inspect(page);
+    assert.equal(result.calls.length, 1);
+    assert.equal(result.calls[0].method, 'POST');
+    assert.equal(result.calls[0].texts.length, 120);
+    assert.ok(result.translations.every(text => text.startsWith('google/zh-CN::')));
+    assert.deepEqual(result.renders.map(render => render.count), [120]);
+  });
+
+check('Google batches keep long text and reserved characters intact',
+  '<p id="source">' + 'Symbols &amp; plus+equals= hash#question? 中文. '.repeat(30) + '</p>',
+  { settings: { provider: 'google' } }, async page => {
+    const original = await page.locator('#source').textContent();
+    await start(page);
+    const result = await inspect(page);
+    assert.equal(result.calls.length, 1);
+    assert.deepEqual(result.calls[0].texts, [original.trim()]);
+  });
+
+check('Google string-array responses are mapped in the original paragraph order',
+  paragraphs(4), { settings: { provider: 'google' }, mock: { googleStringArray: true } }, async page => {
+    await start(page, 4);
+    const result = await inspect(page);
+    assert.equal(result.calls.length, 1);
+    for (let index = 0; index < 4; index++) assert.ok(result.translations[index].includes(`Paragraph ${index}:`));
+  });
+
+check('Google responses across two batches still display as a whole page',
+  paragraphs(150), { settings: { provider: 'google' }, mock: { delays: [30, 550] } }, async page => {
+    await page.evaluate(() => window.__TEST.startTranslation());
+    await page.waitForFunction(() => window.__TEST.session.stats.done >= 128);
+    assert.equal(await page.locator('.et-translation').count(), 0);
+    await idle(page, 150);
+    const result = await inspect(page);
+    assert.equal(result.calls.length, 2);
+    assert.deepEqual(result.renders.map(render => render.count), [150]);
+  });
+
+check('a mismatched Google response falls back without shifting translations',
+  paragraphs(120), { settings: { provider: 'google', autoFallback: true }, mock: { googleBadCount: true } }, async page => {
+    await start(page, 120);
+    const result = await inspect(page);
+    assert.deepEqual(result.calls.map(call => call.provider), ['google', 'microsoft']);
+    assert.ok(result.translations.every(text => text.startsWith('microsoft/')));
+    assert.deepEqual(result.renders.map(render => render.count), [120]);
+  });
+
+check('empty Google translations leave the original content visible', paragraphs(3),
+  { settings: { provider: 'google', translationOnly: true }, mock: { googleEmptyItem: true } }, async page => {
+    await page.evaluate(() => window.__TEST.startTranslation());
+    await page.waitForFunction(() => window.__TEST.session.stats.failed === 3);
+    assert.equal(await page.locator('.et-translation').count(), 0);
+    assert.equal(await page.locator('.et-source-hidden').count(), 0);
+  });
+
+check('HTML-looking Google results remain literal text', paragraphs(1),
+  { settings: { provider: 'google' }, mock: { googleLiteralHtml: true } }, async page => {
+    await start(page);
+    assert.equal(await page.locator('.et-translation img').count(), 0);
+    assert.equal(await page.locator('.et-translation').textContent(), '<img src=x onerror="alert(1)">');
+  });
+
+check('a fast automatic primary does not start a backup request', paragraphs(120),
+  { settings: { provider: 'auto', autoFallback: true } }, async page => {
+    await start(page, 120);
+    await page.waitForTimeout(500);
+    assert.deepEqual((await inspect(page)).calls.map(call => call.provider), ['microsoft']);
+  });
+
+check('a slow automatic primary is overtaken by one batched backup and canceled', paragraphs(120),
+  { settings: { provider: 'auto', autoFallback: true }, mock: { providerLatencies: { microsoft: 1800, google: 40 } } }, async page => {
+    await start(page, 120);
+    const result = await inspect(page);
+    assert.deepEqual(result.calls.map(call => call.provider), ['microsoft', 'google']);
+    assert.equal(result.calls[1].texts.length, 120);
+    assert.ok(result.calls[0].aborted);
+    assert.ok(result.calls[1].at - result.calls[0].at >= 400);
+    assert.ok(result.calls[1].at - result.calls[0].at < 1300);
+    assert.ok(result.translations.every(text => text.startsWith('google/')));
+    assert.deepEqual(result.renders.map(render => render.count), [120]);
+  });
+
+check('automatic network failure changes route immediately without retrying the failed primary', paragraphs(2),
+  { settings: { provider: 'auto', autoFallback: true }, mock: { microsoftNetworkError: true } }, async page => {
+    await start(page, 2);
+    const result = await inspect(page);
+    assert.deepEqual(result.calls.map(call => call.provider), ['microsoft', 'google']);
+    assert.ok(result.calls[1].at - result.calls[0].at < 400);
+  });
+
+check('automatic racing never probes DeepL and uses it only after both free routes fail', paragraphs(120),
+  { settings: { provider: 'auto', autoFallback: true, deeplKey: 'TEST_ONLY_FAKE_KEY:fx' },
+    mock: { microsoftDenied: true, googleBadCount: true } }, async page => {
+    await start(page, 120);
+    const result = await inspect(page);
+    assert.deepEqual(result.calls.map(call => call.provider), ['microsoft', 'google', 'deepl', 'deepl', 'deepl']);
+    assert.ok(result.calls[2].at >= result.calls[1].endedAt);
+    assert.ok(result.translations.every(text => text.startsWith('deepl/')));
+  });
+
+check('the selected manual provider does not start speculative requests', paragraphs(1),
+  { settings: { provider: 'microsoft', autoFallback: true }, mock: { latencyMs: 550 } }, async page => {
+    await start(page);
+    assert.deepEqual((await inspect(page)).calls.map(call => call.provider), ['microsoft']);
+  });
+
+check('automatic routing can still shrink a rejected large request', paragraphs(120),
+  { settings: { provider: 'auto', autoFallback: true }, mock: { rejectLarge: true } }, async page => {
+    await start(page, 120);
+    const result = await inspect(page);
+    assert.equal(result.failed, 0);
+    assert.equal(result.translated, 120);
+    assert.ok(result.calls.some(call => call.texts.length <= 32));
+    assert.deepEqual(result.renders.map(render => render.count), [120]);
+  });
+
+check('the next automatic round starts with the route that just won', paragraphs(2),
+  { settings: { provider: 'auto', autoFallback: true }, mock: { providerLatencies: { microsoft: 1600, google: 30 } } }, async page => {
+    await start(page, 2);
+    await page.evaluate(() => document.querySelector('main').insertAdjacentHTML('beforeend',
+      '<p>New readable content after the faster route was selected.</p>'));
+    await idle(page, 3);
+    assert.deepEqual((await inspect(page)).calls.map(call => call.provider), ['microsoft', 'google', 'google']);
+  });
+
+check('stopping automatic work cancels both routes and staged display', paragraphs(120),
+  { settings: { provider: 'auto', autoFallback: true }, mock: { providerLatencies: { microsoft: 1800, google: 1000 } } }, async page => {
+    await page.evaluate(() => window.__TEST.startTranslation());
+    await page.waitForFunction(() => window.__calls.length === 2);
+    await page.evaluate(() => window.__TEST.stopTranslation());
+    await page.waitForTimeout(150);
+    const result = await inspect(page);
+    assert.ok(result.calls.every(call => call.aborted));
+    assert.equal(result.translated, 0);
+  });
+
+check('stopping before the backup timer prevents its request', paragraphs(1),
+  { settings: { provider: 'auto', autoFallback: true }, mock: { latencyMs: 1800 } }, async page => {
+    await page.evaluate(() => window.__TEST.startTranslation());
+    await page.waitForFunction(() => window.__calls.length === 1);
+    await page.evaluate(() => window.__TEST.stopTranslation());
+    await page.waitForTimeout(600);
+    const result = await inspect(page);
+    assert.equal(result.calls.length, 1);
+    assert.ok(result.calls[0].aborted);
+  });
+
+check('reloading a translated page reuses persisted cache with zero requests', paragraphs(120),
+  {}, async (page, { reload }) => {
+    await start(page, 120);
+    await reload();
+    await start(page, 120);
+    const result = await inspect(page);
+    assert.equal(result.calls.length, 0);
+    assert.deepEqual(result.renders.map(render => render.count), [120]);
+  });
+
+check('disabling persistence leaves no saved translations for reload', paragraphs(2),
+  {}, async (page, { reload }) => {
+    await start(page, 2);
+    await change(page, 'persistentCache', false);
+    await reload();
+    await start(page, 2);
+    assert.equal((await inspect(page)).calls.length, 1);
+    assert.equal(await page.evaluate(() => window.__store['et:cache:v1']), undefined);
+  });
+
+check('clearing cache also removes saved translations before reload', paragraphs(2),
+  {}, async (page, { reload }) => {
+    await start(page, 2);
+    await page.evaluate(() => window.__TEST.getUi().clear.click());
+    await reload();
+    await start(page, 2);
+    assert.equal((await inspect(page)).calls.length, 1);
+  });
+
+check('expired persisted translations are fetched again', paragraphs(2),
+  {}, async (page, { reload }) => {
+    await start(page, 2);
+    await reload(stored => {
+      const cache = JSON.parse(stored['et:cache:v1']);
+      for (const entry of cache.entries) entry[3] = Date.now() - 1000;
+      stored['et:cache:v1'] = JSON.stringify(cache);
+      return stored;
+    });
+    await start(page, 2);
+    assert.equal((await inspect(page)).calls.length, 1);
+  });
+
+check('corrupt persisted cache does not prevent translation', paragraphs(2),
+  { storage: { 'et:cache:v1': '{bad json' } }, async page => {
+    await start(page, 2);
+    assert.equal((await inspect(page)).calls.length, 1);
+  });
+
+check('translation cache never falls back to page localStorage without GM storage', paragraphs(2),
+  { mock: { noGMStorage: true } }, async page => {
+    await start(page, 2);
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pagehide')));
+    assert.equal(await page.evaluate(() => localStorage.getItem('et:cache:v1')), null);
+  });
+
+check('display switches reuse existing nodes without scans, requests or generation changes', paragraphs(4),
+  {}, async page => {
+    await start(page, 4);
+    const generation = await page.evaluate(() => window.__TEST.session.generation);
+    await change(page, 'translationOnly', true);
+    assert.equal(await page.locator('.et-source-hidden').count(), 4);
+    await change(page, 'translationOnly', false);
+    assert.equal(await page.locator('.et-source-hidden').count(), 0);
+    assert.equal((await inspect(page)).calls.length, 1);
+    assert.equal(await page.evaluate(() => window.__TEST.session.generation), generation);
+    assert.deepEqual((await inspect(page)).renders.map(render => render.count), [4]);
+  });
+
+check('switching display during requests preserves work and commits the chosen mode together', paragraphs(150),
+  { mock: { latencyMs: 550 } }, async page => {
+    await page.evaluate(() => window.__TEST.startTranslation());
+    await page.waitForFunction(() => window.__calls.length === 1);
+    await change(page, 'translationOnly', true);
+    await idle(page, 150);
+    const result = await inspect(page);
+    assert.equal(result.calls.length, 2);
+    assert.ok(result.calls.every(call => !call.aborted));
+    assert.equal(await page.locator('.et-source-hidden').count(), 150);
+    assert.deepEqual(result.renders.map(render => render.count), [150]);
+  });
+
+check('one mouse click translates, right click opens settings, and another click restores', paragraphs(2),
+  {}, async page => {
+    const rect = await page.evaluate(() => {
+      const rect = window.__TEST.getUi().fab.getBoundingClientRect();
+      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    });
+    await page.mouse.click(rect.x, rect.y);
+    await idle(page, 2);
+    await page.mouse.click(rect.x, rect.y, { button: 'right' });
+    assert.equal(await page.evaluate(() => window.__TEST.getUi().panel.hidden), false);
+    assert.equal((await inspect(page)).calls.length, 1);
+    await page.evaluate(() => window.__TEST.getUi().close.click());
+    await page.mouse.click(rect.x, rect.y);
+    assert.equal(await page.locator('.et-translation').count(), 0);
   });
