@@ -16,6 +16,8 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 
 当前版本：`0.2.0`。直接查看安装文件：[edge-translator.user.js](edge-translator.user.js)。
 
+> 从 v0.1 升级：v0.2 的脚本名称和 `@namespace` 已改为 PageLingo。安装前请先在 Tampermonkey / ScriptCat 中禁用或删除旧的「双语网页翻译（Edge）」脚本，避免管理器里保留两份。v0.2 已加入 `@updateURL`，之后可在脚本管理器中检查更新。
+
 ### v0.2.0 主要更新
 
 - **通用文本块识别**：按实际布局寻找叶子文本块，不再只处理 `p / li / h1`，可覆盖 `div`、`span`、`section`、自定义元素和短文本。
@@ -151,6 +153,8 @@ PageLingo (Bilingual Web Page Translation) is a single-file userscript for Micro
 Click the **译** button at the edge of a page to add Chinese translations below the original text. Click it again to restore the original page. PageLingo preserves links, layout, and page interactions as much as possible.
 
 Current version: `0.2.0`. View the userscript file: [edge-translator.user.js](edge-translator.user.js).
+
+> Upgrading from v0.1: v0.2 changes both the script name and `@namespace` to PageLingo. Disable or remove the old **双语网页翻译（Edge）** script in Tampermonkey / ScriptCat before installing v0.2 so the manager does not keep two copies. v0.2 includes `@updateURL`, so later versions can be checked from the userscript manager.
 
 ### What's new in 0.2.0
 

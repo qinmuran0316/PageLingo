@@ -7,6 +7,8 @@
 // @license      MIT
 // @homepageURL  https://github.com/qinmuran0316/PageLingo
 // @supportURL   https://github.com/qinmuran0316/PageLingo/issues
+// @updateURL    https://raw.githubusercontent.com/qinmuran0316/PageLingo/main/edge-translator.user.js
+// @downloadURL  https://raw.githubusercontent.com/qinmuran0316/PageLingo/main/edge-translator.user.js
 // @match        http://*/*
 // @match        https://*/*
 // @exclude      *://edge.microsoft.com/*
