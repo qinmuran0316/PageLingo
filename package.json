@@ -1,0 +1,14 @@
+{
+  "name": "pagelingo-userscript",
+  "version": "0.6.0",
+  "private": true,
+  "description": "Development checks for the standalone PageLingo userscript",
+  "scripts": {
+    "check": "node --check edge-translator.user.js",
+    "test": "node --test tests/translation.cjs",
+    "bench": "node tests/benchmark.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.56.1"
+  }
+}

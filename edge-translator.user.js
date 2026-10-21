@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PageLingo — 双语网页翻译
 // @namespace    https://github.com/qinmuran0316/PageLingo
-// @version      0.5.0
+// @version      0.6.0
 // @description  PageLingo：用微软 / DeepL / Google / MyMemory 翻译网页，支持双语对照、仅译文、划词翻译和快捷键
 // @author       qinmuran0316
 // @license      MIT
@@ -33,7 +33,7 @@
   if (window.__EDGE_TRANSLATOR_LOADED__) return;
   window.__EDGE_TRANSLATOR_LOADED__ = true;
 
-  const VERSION = '0.5.0';
+  const VERSION = '0.6.0';
   const HOST_ID = 'et-translator-host';
   const STYLE_ID = 'et-page-style';
   const SETTINGS_KEY = 'et:settings:v1';
@@ -42,9 +42,16 @@
   const PAGE_CONCURRENCY = 2;
   const SCAN_BUDGET_MS = 6;
   const BATCH_WAIT_MS = 16;
+  const AUTO_ALL_MAX_CANDIDATES = 160;
+  const AUTO_ALL_MAX_CHARS = 32000;
+  const VIEWPORT_MARGIN_PX = 0;
   const MAX_BLOCK_CHARS = 1800;
-  const MAX_BATCH_ITEMS = 32;
-  const MAX_BATCH_CHARS = 8000;
+  const PROVIDER_BATCH_LIMITS = {
+    microsoft: { items: 128, chars: 24000 },
+    deepl: { items: 50, chars: 24000 },
+    google: { items: 1, chars: 1800 },
+    mymemory: { items: 1, chars: 1800 },
+  };
   const CACHE_MAX_ITEMS = 1000;
   const CACHE_MAX_BYTES = 2 * 1024 * 1024;
   const DEBUG = false;
@@ -486,6 +493,7 @@
       return;
     }
     const priorityIndex = lane.queue.findIndex((item) => item.context.purpose === 'selection');
+    if (priorityIndex < 0 && document.hidden) return;
     const item = lane.queue.splice(priorityIndex < 0 ? 0 : priorityIndex, 1)[0];
     item.started = true;
     item.cleanup();
@@ -662,6 +670,7 @@
       lastError: '',
       lastOkAt: 0,
       adaptiveGap: 0,
+      smallBatches: false,
     };
   }
 
@@ -890,6 +899,35 @@
     mymemory: mymemoryTranslate,
   };
 
+  function providerBatchLimits(name) {
+    const limits = PROVIDER_BATCH_LIMITS[name];
+    return providerStates[name].smallBatches
+      ? { items: Math.min(limits.items, 32), chars: Math.min(limits.chars, 8000) }
+      : limits;
+  }
+
+  async function translateProviderBatch(name, texts, targetLang, context) {
+    // Fallback providers have different batch sizes; never pass a Microsoft
+    // batch unchanged to DeepL or a single-text adapter.
+    const limits = providerBatchLimits(name);
+    const batches = [];
+    let batch = [];
+    let chars = 0;
+    for (const text of texts) {
+      if (batch.length && (batch.length >= limits.items || chars + text.length > limits.chars)) {
+        batches.push(batch);
+        batch = [];
+        chars = 0;
+      }
+      batch.push(text);
+      chars += text.length;
+    }
+    if (batch.length) batches.push(batch);
+    const results = await mapConcurrent(batches, 2,
+      part => providerImpl[name](part, targetLang, context), context.signal);
+    return results.flat();
+  }
+
   async function requestWithRetry(name, texts, targetLang, budget, context) {
     let lastError = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -898,7 +936,8 @@
       budget.remaining -= 1;
       const linked = linkedController(context.signal);
       try {
-        const result = await providerImpl[name](texts, targetLang, { ...context, signal: linked.controller.signal });
+        const result = await translateProviderBatch(name, texts, targetLang,
+          { ...context, signal: linked.controller.signal });
         throwIfAborted(context.signal);
         noteProviderSuccess(name);
         return result;
@@ -906,6 +945,12 @@
         linked.controller.abort();
         throwIfAborted(context.signal);
         lastError = err;
+        if ((err.status === 413 || err.status === 414) &&
+          !providerStates[name].smallBatches && texts.length > 1 &&
+          attempt === 0 && budget.remaining > 0) {
+          providerStates[name].smallBatches = true;
+          continue;
+        }
         if (!isAbortError(err) && err.kind !== 'cooldown') noteProviderFailure(name, err);
         if (
           isAbortError(err) ||
@@ -1026,6 +1071,12 @@
     scanRoots: new Set(),
     scanHandle: 0,
     scanStats: { slices: 0, maxSliceMs: 0, candidates: 0 },
+    scanMode: 'pending',
+    scanCandidates: [],
+    scanCandidateChars: 0,
+    scopeChars: 0,
+    renderQueue: new Map(),
+    renderFrame: 0,
     cleanupJobs: [],
     cleanupHandle: 0,
     io: null,
@@ -1080,12 +1131,19 @@
   function resetSessionState() {
     cancelScan();
     cancelCleanup();
+    if (session.renderFrame) cancelAnimationFrame(session.renderFrame);
+    session.renderFrame = 0;
+    session.renderQueue.clear();
     session.queue = [];
     session.inFlight = 0;
     session.busy = false;
     session.elements = new Set();
     session.pendingTexts = new Map();
     session.scanStats = { slices: 0, maxSliceMs: 0, candidates: 0 };
+    session.scanMode = settings.fullPage ? 'all' : 'pending';
+    session.scanCandidates = [];
+    session.scanCandidateChars = 0;
+    session.scopeChars = 0;
     session.failedElements = new Set();
     session.translations = new Set();
     session.sourceWrappers = new Set();
@@ -1370,6 +1428,87 @@
     return id;
   }
 
+  function observeCandidateInViewport(el) {
+    if (!el || !el.isConnected) return;
+    if (session.io) session.io.observe(el);
+    else if (isInViewport(el)) enqueueElement(el);
+  }
+
+  function isInViewport(el) {
+    const rect = el.getBoundingClientRect();
+    return rect.bottom > -VIEWPORT_MARGIN_PX && rect.top < innerHeight + VIEWPORT_MARGIN_PX &&
+      rect.right > 0 && rect.left < innerWidth;
+  }
+
+  function switchToViewportMode() {
+    if (session.scanMode === 'viewport') return;
+    session.scanMode = 'viewport';
+    ensureIntersectionObserver();
+    const candidates = session.scanCandidates;
+    session.scanCandidates = [];
+    session.scanCandidateChars = 0;
+    for (const el of candidates) observeCandidateInViewport(el);
+    reportStatus({
+      kind: 'working',
+      message: '页面内容较多，正在集中翻译当前屏幕；滚动后继续',
+    });
+    syncUi();
+  }
+
+  function switchToAllMode() {
+    session.scanMode = 'all';
+    const candidates = session.scanCandidates;
+    session.scanCandidates = [];
+    session.scanCandidateChars = 0;
+    for (const el of candidates) enqueueElement(el);
+    reportStatus({
+      kind: 'working',
+      message: `页面规模适中，正在一次性翻译全部 ${candidates.length} 段`,
+    });
+    syncUi();
+  }
+
+  function finishAdaptiveScan() {
+    if (session.scanMode === 'all' && session.scanCandidates.length) {
+      switchToAllMode();
+      return;
+    }
+    if (session.scanMode !== 'pending') return;
+    if (
+      session.scanCandidates.length <= AUTO_ALL_MAX_CANDIDATES &&
+      session.scanCandidateChars <= AUTO_ALL_MAX_CHARS
+    ) {
+      switchToAllMode();
+    } else {
+      switchToViewportMode();
+    }
+  }
+
+  function queueDiscoveredCandidate(el) {
+    const textLength = getSourceText(el).length;
+    session.scopeChars += textLength;
+    if (session.scanMode === 'all' && !settings.fullPage &&
+      (session.scanStats.candidates > AUTO_ALL_MAX_CANDIDATES || session.scopeChars > AUTO_ALL_MAX_CHARS)) {
+      switchToViewportMode();
+    }
+    if (session.scanMode === 'all') {
+      session.scanCandidates.push(el);
+      return;
+    }
+    if (session.scanMode === 'viewport') {
+      observeCandidateInViewport(el);
+      return;
+    }
+    session.scanCandidates.push(el);
+    session.scanCandidateChars += textLength;
+    if (
+      session.scanCandidates.length > AUTO_ALL_MAX_CANDIDATES ||
+      session.scanCandidateChars > AUTO_ALL_MAX_CHARS
+    ) {
+      switchToViewportMode();
+    }
+  }
+
   function runScanSlice() {
     session.scanHandle = 0;
     if (!session.active || document.hidden) return;
@@ -1386,10 +1525,13 @@
         if (observed.has(el) || !el.isConnected) continue;
         observed.add(el);
         session.scanStats.candidates += 1;
-        if (settings.fullPage) enqueueElement(el);
-        else if (session.io) session.io.observe(el);
-        else enqueueElement(el);
+        queueDiscoveredCandidate(el);
       }
+    }
+    if (!session.scanJobs.length) {
+      finishAdaptiveScan();
+      scheduleRenderCommit();
+      pushStatusProgress();
     }
     session.scanStats.slices += 1;
     session.scanStats.maxSliceMs = Math.max(session.scanStats.maxSliceMs, performance.now() - started);
@@ -1401,6 +1543,8 @@
     session.scanHandle = 0;
     session.scanJobs = [];
     session.scanRoots.clear();
+    session.scanCandidates = [];
+    session.scanCandidateChars = 0;
   }
 
   function ensureIntersectionObserver() {
@@ -1414,13 +1558,13 @@
           enqueueElement(entry.target);
         }
       },
-      { root: null, rootMargin: '700px 0px 700px 0px', threshold: 0.01 }
+      { root: null, rootMargin: `${VIEWPORT_MARGIN_PX}px 0px`, threshold: 0 }
     );
   }
 
   function observeCandidates(root) {
     if (!session.active) return;
-    ensureIntersectionObserver();
+    if (session.scanMode === 'viewport') ensureIntersectionObserver();
     if (!root || session.scanRoots.has(root)) return;
     session.scanRoots.add(root);
     session.scanJobs.push({ root, iterator: candidateSteps(root) });
@@ -1478,7 +1622,8 @@
       const state = elementStates.get(el);
       if (!state || state.status === 'paused' || state.status === 'queued' || state.status === 'active') return;
       const text = getSourceText(el);
-      if (text === state.text && state.translationEl && state.translationEl.isConnected) return;
+      if (text === state.text && ((state.translationEl && state.translationEl.isConnected) ||
+        session.renderQueue.get(el) === state)) return;
       if (!bumpChangeGuard(el)) {
         state.status = 'paused';
         removeTranslationNode(state.translationEl);
@@ -1488,6 +1633,7 @@
         return;
       }
       removeTranslationNode(state.translationEl);
+      session.renderQueue.delete(el);
       elementStates.delete(el);
       session.elements.delete(el);
       observed.delete(el);
@@ -1543,6 +1689,7 @@
       const state = elementStates.get(el);
       if (state) {
         removeTranslationNode(state.translationEl);
+        session.renderQueue.delete(el);
         elementStates.delete(el);
         session.elements.delete(el);
         session.failedElements.delete(el);
@@ -1637,23 +1784,58 @@
     if (extraMessage) progressMessage = extraMessage;
     if (progressFrame) return;
     progressFrame = requestAnimationFrame(() => {
-    progressFrame = 0;
-    if (!session.active) { progressMessage = ''; return; }
-    const pending = session.queue.length + session.inFlight;
-    const message =
-      progressMessage ||
-      (pending > 0
-        ? `正在翻译… 已完成 ${session.stats.done} 段`
-        : `已翻译 ${session.stats.done} 段${session.stats.failed ? `，失败 ${session.stats.failed} 段` : ''}`);
-    reportStatus({
-      message,
-      provider: lastProvider,
-      done: session.stats.done,
-      failed: session.stats.failed,
-      pending,
-      kind: session.stats.failed ? 'error' : (pending || session.scanJobs.length) ? 'working' : 'done',
+      progressFrame = 0;
+      if (!session.active) { progressMessage = ''; return; }
+      const pending = session.queue.length + session.inFlight + session.renderQueue.size;
+      const scope = session.scanMode === 'viewport' ? '当前屏幕' : '整页';
+      const message = progressMessage || (session.scanMode === 'pending'
+        ? `正在分析页面规模… 已发现 ${session.scanCandidates.length} 段`
+        : pending > 0
+          ? `正在批量翻译${scope}… 已准备 ${session.stats.done}/${session.stats.total} 段，完成后一起显示`
+          : `已翻译 ${session.stats.done} 段${session.stats.failed ? `，失败 ${session.stats.failed} 段` : ''}`);
+      reportStatus({
+        message,
+        provider: lastProvider,
+        done: session.stats.done,
+        failed: session.stats.failed,
+        pending,
+        kind: session.stats.failed ? 'error' : (pending || session.scanJobs.length) ? 'working' : 'done',
+      });
+      progressMessage = '';
     });
-    progressMessage = '';
+  }
+
+  function canCommitTranslations() {
+    return session.active && !document.hidden && session.scanMode !== 'pending' &&
+      session.inFlight === 0 && session.queue.length === 0 &&
+      (session.scanMode === 'viewport' || session.scanJobs.length === 0);
+  }
+
+  function scheduleRenderCommit(allowPending = false) {
+    if (!session.active || document.hidden || session.renderFrame || !session.renderQueue.size) return;
+    if (!allowPending && !canCommitTranslations()) return;
+    const generation = session.generation;
+    session.renderFrame = requestAnimationFrame(() => {
+      session.renderFrame = 0;
+      if (generation !== session.generation || !session.active) return;
+      if (!allowPending && !canCommitTranslations()) return;
+      const ready = [];
+      // Finish source and layout reads before doing any writes. A slow response
+      // must not make an earlier result overwrite content edited in the meantime.
+      for (const [el, state] of session.renderQueue) {
+        session.renderQueue.delete(el);
+        if (!el.isConnected || elementStates.get(el) !== state || state.generation !== generation) continue;
+        if (getSourceText(el) !== state.text) {
+          scheduleRecheck(el);
+          continue;
+        }
+        state.layout = readElementLayout(el);
+        ready.push([el, state]);
+      }
+      withMutationPaused(() => {
+        for (const [el, state] of ready) writeElementTranslation(el, state);
+      });
+      pushStatusProgress();
     });
   }
 
@@ -1720,6 +1902,12 @@
   }
 
   function renderElement(el, state) {
+    if (state.pending > 0 || !state.results.some(value => typeof value === 'string' && value.trim())) return;
+    session.renderQueue.set(el, state);
+    scheduleRenderCommit();
+  }
+
+  function writeElementTranslation(el, state) {
     const values = state.results.filter((value) => typeof value === 'string' && value.trim());
     if (!values.length) return;
     const node = state.translationEl && state.translationEl.isConnected
@@ -1813,7 +2001,7 @@
   function markJobFailed(job, err, deferRender = false) {
     const state = elementStates.get(job.el);
     if (!state || state !== job.state || state.generation !== job.generation) return;
-    if (state.results[job.partIndex] !== undefined) return;
+    if (state.results[job.partIndex] !== undefined || state.failedParts.has(job.partIndex)) return;
     state.failedParts.add(job.partIndex);
     state.pending = Math.max(0, state.pending - 1);
     session.stats.failed += 1;
@@ -1832,6 +2020,7 @@
     const currentText = snapshot === undefined ? getSourceText(job.el) : snapshot;
     if (currentText !== state.text) {
       removeTranslationNode(state.translationEl);
+      session.renderQueue.delete(job.el);
       elementStates.delete(job.el);
       session.elements.delete(job.el);
       observed.delete(job.el);
@@ -1839,6 +2028,7 @@
         enqueueElement(job.el);
       } else {
         state.status = 'paused';
+        elementStates.set(job.el, state);
         session.failedElements.add(job.el);
         reportStatus({ kind: 'error', message: '页面内容频繁变化，已暂停自动重译此段' });
         syncUi();
@@ -1878,13 +2068,13 @@
         message: firstCooling ? cooldownMessage(firstCooling) : '翻译接口暂不可用，稍后自动重试',
       });
       syncUi();
+      scheduleRenderCommit(true);
       schedulePump(15000);
       return null;
     }
 
-    const supportsBatch = provider === 'microsoft' || provider === 'deepl';
-    const maxTexts = supportsBatch ? MAX_BATCH_ITEMS : 1;
-    const maxJobs = supportsBatch ? 64 : 1;
+    const limits = providerBatchLimits(provider);
+    const maxJobs = Math.max(256, limits.items);
     const selected = [];
     const selectedSet = new Set();
     const texts = new Set();
@@ -1895,7 +2085,7 @@
       const state = elementStates.get(job.el);
       if (!state || state.status === 'done') continue;
       const isNewText = !texts.has(job.text);
-      if (isNewText && (texts.size >= maxTexts || chars + job.text.length > MAX_BATCH_CHARS)) continue;
+      if (isNewText && (texts.size >= limits.items || chars + job.text.length > limits.chars)) continue;
       selected.push(job);
       selectedSet.add(job);
       if (isNewText) {
@@ -1949,12 +2139,11 @@
     const indexed = new Map(batch.texts.map((text, index) => [text, outcomes[index]]));
     const snapshots = new Map();
     const render = new Set();
-    // Read source/layout once per element before any of this batch's DOM writes.
+    // Read each element's source once before applying this batch's results.
     for (const job of batch.jobs) {
       const state = elementStates.get(job.el);
       if (state !== job.state || !job.el.isConnected || snapshots.has(job.el)) continue;
       snapshots.set(job.el, getSourceText(job.el));
-      state.layout = readElementLayout(job.el);
     }
     let cooling = false;
     withMutationPaused(() => {
@@ -1965,7 +2154,10 @@
           if (typeof result.translation === 'string' && result.translation.trim()) {
             applyJobResult(job, result.translation.trim(), result.provider, snapshots.get(job.el), true);
             render.add(job.el);
-          } else markJobFailed(job, new ProviderError('接口返回空译文', 'protocol'), true);
+          } else {
+            markJobFailed(job, new ProviderError('接口返回空译文', 'protocol'), true);
+            render.add(job.el);
+          }
         } else if (!isAbortError(outcome.reason)) {
           if (outcome.reason.kind === 'cooldown' && elementStates.get(job.el) === job.state) {
             job.state.status = 'queued';
@@ -1982,7 +2174,11 @@
         if (state && state.pending === 0 && el.isConnected) renderElement(el, state);
       }
     });
-    if (cooling) schedulePump(15000);
+    if (cooling) {
+      scheduleRenderCommit(true);
+      schedulePump(15000);
+    }
+    scheduleRenderCommit();
     pushStatusProgress();
   }
 
@@ -2003,10 +2199,12 @@
         if (generation !== session.generation) return;
         session.inFlight = Math.max(0, session.inFlight - 1);
         session.busy = session.inFlight > 0;
+        scheduleRenderCommit();
         pushStatusProgress();
         if (session.active && session.queue.length) schedulePump(0);
       });
     }
+    scheduleRenderCommit();
     pushStatusProgress();
   }
 
@@ -2059,7 +2257,7 @@
     });
     syncUi();
     observeCandidates(document);
-    pushStatusProgress('正在翻译可见区域…');
+    pushStatusProgress(settings.fullPage ? '正在翻译整页…' : '正在分析页面规模…');
     schedulePump(0);
   }
 
@@ -2104,19 +2302,20 @@
     if (!session.active) return;
     session.generation += 1;
     if (session.controller) session.controller.abort();
-    session.controller = new AbortController();
-    session.queue = [];
     abortPageRequests();
-    if (session.retryTimer) {
-      clearTimeout(session.retryTimer);
-      session.retryTimer = 0;
+    if (session.io) {
+      session.io.disconnect();
+      session.io = null;
     }
+    if (session.mo) {
+      session.mo.disconnect();
+      session.mo = null;
+    }
+    if (session.scanTimer) clearTimeout(session.scanTimer);
+    session.scanTimer = 0;
     removeAllTranslations();
-    session.failedElements.clear();
-    session.stats = { total: 0, done: 0, failed: 0 };
-    elementStates = new WeakMap();
-    observed = new WeakSet();
-    changeGuard = new WeakMap();
+    resetSessionState();
+    session.controller = new AbortController();
     pendingScanRoots.clear();
     ensureIntersectionObserver();
     ensureMutationObserver();
@@ -2127,7 +2326,14 @@
   }
 
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && session.active) schedulePump(0);
+    if (!document.hidden && session.active) {
+      if (session.scanJobs.length && !session.scanHandle) {
+        session.scanHandle = postScanTask(runScanSlice);
+      }
+      schedulePump(0);
+      scheduleRenderCommit();
+      for (const name of requestLanes.keys()) drainRequestLane(name);
+    }
   });
 
   window.addEventListener('pagehide', () => {
@@ -2137,11 +2343,7 @@
 
   window.addEventListener('pageshow', (event) => {
     if (!event.persisted || !session.active) return;
-    observed = new WeakSet();
-    ensureIntersectionObserver();
-    ensureMutationObserver();
-    observeCandidates(document);
-    schedulePump(0);
+    restartTranslation();
   });
 
   // ---------------------------------------------------------------------------
@@ -2460,7 +2662,7 @@ details.more[open] summary { margin-bottom: 8px; }
   <div class="checks">
     <label class="check"><input type="checkbox" data-field="autoFallback">接口失败时自动回退</label>
     <label class="check"><input type="checkbox" data-field="allowLowQuality">允许 MyMemory 低质量兜底</label>
-    <label class="check"><input type="checkbox" data-field="fullPage">全页模式（含导航/侧栏，实验）</label>
+    <label class="check"><input type="checkbox" data-field="fullPage">强制整页（含导航/侧栏）</label>
     <label class="check"><input type="checkbox" data-field="translationOnly">仅显示译文（隐藏原文）</label>
     <label class="check"><input type="checkbox" data-field="selection">划词翻译</label>
     <label class="check"><input type="checkbox" data-field="siteAuto">本网站自动翻译</label>
@@ -2492,6 +2694,7 @@ details.more[open] summary { margin-bottom: 8px; }
       <button class="mini-btn" type="button" data-action="reset-pos">重置按钮位置</button>
     </div>
   </details>
+  <p class="hint">页面较小时自动整页翻译；页面过大时只翻译当前屏幕，滚动后继续。勾选“强制整页”可跳过此限制。</p>
   <p class="hint">自动顺序：微软 → DeepL（配置 Key 后）→ Google。MyMemory 默认不参与自动兜底。仅发送需要翻译的文本，不上传整页内容。</p>
 </section>
 <button class="sel-btn" type="button" hidden aria-label="翻译选中文字">译</button>
@@ -2628,7 +2831,7 @@ details.more[open] summary { margin-bottom: 8px; }
       } else {
         reportStatus({
           kind: 'idle',
-          message: settings.fullPage ? '已开启全页模式' : '已恢复正文模式',
+          message: settings.fullPage ? '已开启强制整页模式' : '已恢复自适应范围模式',
         });
         syncUi();
       }
