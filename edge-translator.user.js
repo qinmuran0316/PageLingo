@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PageLingo — 双语网页翻译
 // @namespace    https://github.com/qinmuran0316/PageLingo
-// @version      0.7.1
+// @version      0.7.2
 // @description  PageLingo：将英文、日文、韩文等网页内容快速翻译成中文，支持中英日韩多种语言和划词翻译
 // @author       qinmuran0316
 // @license      MIT
@@ -34,7 +34,7 @@
   if (window.__EDGE_TRANSLATOR_LOADED__) return;
   window.__EDGE_TRANSLATOR_LOADED__ = true;
 
-  const VERSION = '0.7.1';
+  const VERSION = '0.7.2';
   const HOST_ID = 'et-translator-host';
   const STYLE_ID = 'et-page-style';
   const SETTINGS_KEY = 'et:settings:v1';
@@ -155,7 +155,7 @@
     autoFallback: false,
     allowLowQuality: true,
     selection: true,
-    fullPage: false,
+    fullPage: true,
     translationOnly: true,
     showOriginal: false,
     persistentCache: false,
