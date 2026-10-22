@@ -2,7 +2,7 @@
 
 **让网页以两种语言展开。 / Read the web in two languages.**
 
-`v0.7.0` · 单文件用户脚本 · Tampermonkey / ScriptCat
+`v0.7.1` · 单文件用户脚本 · Tampermonkey / ScriptCat
 
 [简体中文](#简体中文) · [English](#english)
 
@@ -12,11 +12,18 @@
 
 PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用户脚本，支持 Tampermonkey（油猴）和 ScriptCat（脚本猫）。
 
-点击页面边缘的「译」按钮，即可在原文下方显示中文译文；再次点击恢复原文。脚本会尽量保留原有的链接、排版和页面交互。
+点击页面边缘的「译」按钮，即可翻译网页，默认只显示中文译文；取消「仅显示译文」可恢复双语对照，再次点击按钮恢复原文。
 
-当前版本：`0.7.0`。直接查看安装文件：[edge-translator.user.js](edge-translator.user.js)。
+当前版本：`0.7.1`。直接查看安装文件：[edge-translator.user.js](edge-translator.user.js)。
 
 > 从 v0.1 升级：v0.2 的脚本名称和 `@namespace` 已改为 PageLingo。安装前请先在 Tampermonkey / ScriptCat 中禁用或删除旧的「双语网页翻译（Edge）」脚本，避免管理器里保留两份。v0.2 已加入 `@updateURL`，之后可在脚本管理器中检查更新。
+
+### v0.7.1：默认设置调整
+
+- 接口默认为「微软（免费推荐）」，目标语言为「简体中文」。
+- 默认开启「允许 MyMemory 低质量兜底」「仅显示译文」「划词翻译」。
+- 默认关闭「接口失败时自动回退」「强制整页」「悬停译文显示原文」「本地保存译文缓存」「本网站自动翻译」「禁用本网站」。
+- 已保存的设置会保留。自动回退关闭时，MyMemory 不会作为备用接口被调用；本地缓存关闭时仍可在当前页面复用内存缓存。
 
 ### v0.7.0：Google 真批量、自动择快、刷新复用
 
@@ -25,12 +32,12 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 - **译文一起出现**：同一轮的全部批次完成后，在一个动画帧内统一显示；仅译文模式也等结果就绪后再隐藏原文。接口失败时保留原文，并显示成功部分。
 - **Google 真正批量**：改为 POST 多个 `q` 字段，单批最多 128 段、约 24000 字符，不再逐段 GET 或每 600 字符拆一次。微软批量不变，DeepL 仍为 50 段；413/414 后缩小批次。
 - **自动择快**：自动模式先用当前页面上次成功的免费线路，450ms 未完成时启动另一条微软/Google 线路，使用先完成的有效结果并取消另一条；快速成功时不会启动备用请求。DeepL 不参与竞速，只在失败后兜底；固定接口保持用户选择。
-- **刷新复用**：默认在脚本管理器本地保存最多约 1000 条/2 MiB 译文，7 天到期。刷新或重新打开页面可直接复用；面板可关闭或清除，不降级存入网站的 localStorage。
-- **操作直接**：单击“译”立即翻译/恢复，右键打开设置；双语/仅译文切换直接复用现有节点，不重扫、不重发请求；悬停译文显示原文。
+- **刷新复用**：开启「本地保存译文缓存」后，在脚本管理器本地保存最多约 1000 条/2 MiB 译文，7 天到期。刷新或重新打开页面可直接复用；面板可关闭或清除，不降级存入网站的 localStorage。
+- **操作直接**：单击“译”立即翻译/恢复，右键打开设置；双语/仅译文切换直接复用现有节点，不重扫、不重发请求；可在面板开启悬停译文显示原文。
 - **对比实测**：与 v0.6.0 各交替运行 3 次，在每次 600ms 的模拟网络下，Google 24 段从 24 次请求、约 9.85 秒降为 1 次、约 0.62 秒。真实 Google POST 120 段已返回 HTTP 200 和完整译文，单次约 3.9 秒。模拟数字不代表真实网络速度。
 - **保留已有优化**：两个批次并发、划词优先、取消与重试、免费 Key 保护、接口隔离缓存和动态内容清理继续生效。
 
-升级后确认版本为 **0.7.0**，刷新网页，右键“译”将接口设为「自动择快（推荐）」并开启「接口失败时自动回退」。平时保持「强制整页」不勾选。已有的固定接口偏好不会被升级覆盖；Google 网络较好的用户也可直接选「Google（整页批量）」。
+升级后确认版本为 **0.7.1**，刷新网页。右键“译”可调整设置；需要自动择快时，将接口设为「自动择快（推荐）」并开启「接口失败时自动回退」。已有设置不会被升级覆盖。
 
 ### v0.3.0 新增：仅译文模式
 
@@ -69,8 +76,8 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 | 再次点击「译」 | 恢复原文，只删除脚本插入的译文节点 |
 | 右键「译」或 `Alt+O` | 打开面板，选择接口、目标语言、站点自动翻译、禁用网站等 |
 | 勾选「仅显示译文」 | 隐藏原文，只显示译文；取消勾选恢复双语 |
-| 悬停译文 | 显示原文，可在面板关闭 |
-| 本地保存译文缓存 | 刷新后复用，7 天到期；可关闭，也可一键清除 |
+| 悬停译文 | 默认关闭；在面板开启后可显示原文 |
+| 本地保存译文缓存 | 默认关闭；开启后刷新可复用，7 天到期，也可一键清除 |
 | 选中文字 | 出现小「译」按钮，点击后翻译选中内容，可复制结果 |
 | `Alt+T` | 翻译 / 恢复当前页面 |
 | `Alt+O` | 打开设置面板 |
@@ -85,9 +92,9 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 | 微软 Edge 网页翻译 | 免 Key | 默认主接口，自动识别源语言，支持批量请求 |
 | DeepL | 免费版每月约 50 万字符，需要注册 Key | 可选高质量接口；Key 以 `:fx` 结尾时自动使用免费端点 |
 | Google 网页翻译 | 免 Key | POST 整页批量，参与自动择快，也可手动固定；部分网络环境无法连接 |
-| MyMemory | 免 Key，匿名额度约每天 5000 字符 | 质量较低，默认不自动兜底，需手动选择或勾选低质量兜底 |
+| MyMemory | 免 Key，匿名额度约每天 5000 字符 | 质量较低，低质量兜底默认勾选；需同时开启自动回退才会作为备用接口使用，也可手动选择 |
 
-默认自动模式在 **微软与 Google** 间择快，当前页面先用上次成功的线路；两者均失败后，才使用已配置的 DeepL。MyMemory 仅在明确允许低质量兜底后参与。面板可以固定接口；关闭自动回退后也不会启动备用线路。
+默认固定使用微软，自动回退关闭。选择自动模式并开启自动回退后，会在 **微软与 Google** 间择快，当前页面先用上次成功的线路；两者均失败后，才使用已配置的 DeepL。MyMemory 仅在允许低质量兜底时参与回退。关闭自动回退后不会启动备用线路。
 
 这些接口使用的是网页前端端点，不是有 SLA 承诺的官方开发者 API，可能随时调整或失效。脚本已经隔离适配器、校验响应格式，并提供手动切换和失败重试；但不能保证长期可用。
 
@@ -115,11 +122,11 @@ Key 只保存在脚本管理器本地存储中，只会发送给 DeepL 官方端
 - **统一显示**：成功结果暂存在内存中，当前一轮的批次全部结束后一起写入；缓存命中与新请求也一起显示。写入前再次检查原文和任务代次。
 - **尝试预算**：同一批次最多 3 次接口尝试，包含重试和接口回退；长文本按接口能力分片时，分片请求不计入额外尝试，但受相同的接口间隔和超时约束。
 - **错误处理**：自动竞速时网络错误/5xx 直接切换线路；固定接口重试一次。413/414 可以缩批重试。429 尊重 `Retry-After`；401/403、协议异常暂停对应接口；连续失败熔断；DeepL 额度用尽（HTTP 456）暂停 1 小时。
-- **质量优先**：默认自动回退不包含 MyMemory；低质量兜底必须由用户显式开启。
+- **回退开关**：自动回退默认关闭；开启后，MyMemory 是否参与由「允许 MyMemory 低质量兜底」控制，该选项默认开启。
 - **排版保护**：flex / grid 容器中的译文换到独立行；相邻链接和块边界会补空格后再送入翻译，避免 `HomeDocsAbout` 这类拼接错误。
 - **碎片合并**：flex/grid 中大量短 `span` 词块会合并为一个完整翻译单元，避免逐词请求和逐词译文。
 - **可逆的仅译文模式**：原文被放进临时隐藏容器而不是删除；恢复原文、切换模式或重译时会解包并还原原始节点，避免留下空页面或重复 DOM。
-- **缓存与去重**：内存 LRU 最多约 1000 条或 2 MiB；默认同步到脚本管理器本地，7 天到期；相同原文去重，按来源站点、语言和接口策略隔离。没有 GM 存储时只使用内存。
+- **缓存与去重**：内存 LRU 最多约 1000 条或 2 MiB；本地保存默认关闭，开启后同步到脚本管理器本地，7 天到期；相同原文去重，按来源站点、语言和接口策略隔离。没有 GM 存储时只使用内存。
 - **页面安全**：原文节点保持原位，只追加纯文本译文节点；译文只通过 `textContent` 写入，避免把接口内容当 HTML 执行。
 - **动态页面**：`MutationObserver` 合并新增内容后增量扫描；SPA 路由变化时取消旧任务并重新扫描；渲染前校验任务代次、节点连接状态和原文指纹，防止旧译文贴到新内容。
 - **内容变化保护**：同一段内容在 30 秒内频繁变化超过 3 次时暂停自动重译，避免与实时更新页面互相拉扯。
@@ -134,7 +141,7 @@ Key 只保存在脚本管理器本地存储中，只会发送给 DeepL 官方端
 - 密码框、输入框、可编辑区域和代码块不会自动进入翻译队列。
 - DeepL Key 只保存在脚本管理器存储中，不写入网页存储，不进入日志；输入框不会回填已保存 Key，设置面板使用 closed Shadow DOM。
 - 仅译文模式只是在本地隐藏原文 DOM，不会删除或上传原文。
-- 译文缓存默认保存在脚本管理器本地，包含原文和译文，7 天到期；可取消「本地保存译文缓存」并清除已有缓存。设置也保存在脚本管理器中。
+- 译文缓存默认只保留在当前页面内存中；开启「本地保存译文缓存」后，原文和译文会保存在脚本管理器本地，7 天到期，取消勾选会清除已有缓存。设置保存在脚本管理器中。
 - 脚本没有统计、上报或远程配置功能。
 
 ### 已知限制
@@ -178,7 +185,7 @@ Key 只保存在脚本管理器本地存储中，只会发送给 DeepL 官方端
 
 ### 实现说明
 
-为了安装和分发简单，v0.7.0 使用单个 `.user.js` 文件，不依赖构建工具。文件内按“设置 / 请求 / 接口适配 / 提取 / 调度 / 渲染 / 界面”分段组织。
+为了安装和分发简单，v0.7.1 使用单个 `.user.js` 文件，不依赖构建工具。文件内按“设置 / 请求 / 接口适配 / 提取 / 调度 / 渲染 / 界面”分段组织。
 
 开发验证使用 Node.js 和 Playwright，不影响用户安装。运行 `npm ci`、`npm run check`、`npm test`；速度对比运行 `npm run bench`。测试会优先使用本机 Edge，也可通过 `PAGELINGO_BROWSER_PATH` 指定浏览器；没有 Edge 时先执行 `npx playwright install chromium`。自动化使用模拟接口，基准报告写入 `tests/results/benchmark.json`；详见 [tests/README.md](tests/README.md)。
 
@@ -195,11 +202,18 @@ Key 只保存在脚本管理器本地存储中，只会发送给 DeepL 官方端
 
 PageLingo (Bilingual Web Page Translation) is a single-file userscript for Microsoft Edge. It works with Tampermonkey and ScriptCat.
 
-Click the **译** button at the edge of a page to add Chinese translations below the original text. Click it again to restore the original page. PageLingo preserves links, layout, and page interactions as much as possible.
+Click the **译** button at the edge of a page to translate it into Chinese. Translation-only mode is enabled by default; disable it for bilingual reading, or click the button again to restore the original page.
 
-Current version: `0.7.0`. View the userscript file: [edge-translator.user.js](edge-translator.user.js).
+Current version: `0.7.1`. View the userscript file: [edge-translator.user.js](edge-translator.user.js).
 
 > Upgrading from v0.1: v0.2 changes both the script name and `@namespace` to PageLingo. Disable or remove the old **双语网页翻译（Edge）** script in Tampermonkey / ScriptCat before installing v0.2 so the manager does not keep two copies. v0.2 includes `@updateURL`, so later versions can be checked from the userscript manager.
+
+### New in 0.7.1: updated defaults
+
+- Provider: Microsoft; target language: Simplified Chinese.
+- Enabled: low-quality MyMemory fallback permission, translation-only mode, and selection translation.
+- Disabled: automatic fallback, forced full-page mode, hover originals, local translation cache, site auto-translation, and site disabling.
+- Upgrades preserve saved settings. MyMemory is not used as a fallback while automatic fallback is off; in-memory cache remains available while local persistence is off.
 
 ### New in 0.7.0: real Google batches, faster routing, persistent cache
 
@@ -208,12 +222,12 @@ Current version: `0.7.0`. View the userscript file: [edge-translator.user.js](ed
 - **Display together**: buffer the current round until its requests settle, then show the translations in one animation frame. Translation-only mode keeps originals visible until results are ready. Failed blocks retain their originals.
 - **Real Google batching**: POST repeated `q` fields, up to 128 items / 24,000 characters. No per-paragraph GET or 600-character request splitting. Microsoft batching remains available; DeepL batches up to 50 items. On 413/414, retry smaller batches.
 - **Faster automatic routing**: start with the last successful free route on the current page. After 450ms, try the other Microsoft/Google route if needed; accept the first valid result and cancel the loser. A fast primary never starts a backup. DeepL is only used after failures, never as a speculative probe. Manual provider choices remain respected.
-- **Cache across reloads**: save up to about 1,000 entries / 2 MiB in userscript-manager storage, expiring after seven days. Disable or clear it in settings. Without GM storage, use memory only; translated text is never persisted in website localStorage.
-- **Direct controls**: click **译** to translate/restore; right-click to open settings. Bilingual/translation-only switches reuse existing nodes without scans or requests. Hover a translation to read its original.
+- **Cache across reloads**: enable local translation caching to save up to about 1,000 entries / 2 MiB in userscript-manager storage, expiring after seven days. Disable or clear it in settings. Without GM storage, use memory only; translated text is never persisted in website localStorage.
+- **Direct controls**: click **译** to translate/restore; right-click to open settings. Bilingual/translation-only switches reuse existing nodes without scans or requests. Enable hover originals in settings to read source text on hover.
 - **Measured completion time**: three alternating runs against v0.6.0, 24 Google paragraphs and 600ms simulated requests: about 9.85s / 24 requests became 0.62s / one request. A separate live Google POST returned all 120 translations with HTTP 200 in about 3.9s. Simulated timings do not predict real network speed.
 - **Existing protections remain**: two concurrent page batches, selection priority, cancellation, free-key protection, provider-aware cache, and dynamic-node cleanup.
 
-After upgrading, confirm **0.7.0**, reload the target page, and right-click **译** to select automatic routing with automatic fallback enabled. Leave **Force full page** unchecked. Upgrades preserve an existing manual provider preference; Google can also be selected directly when it works well on your network.
+After upgrading, confirm **0.7.1** and reload the target page. Right-click **译** to adjust settings; select automatic routing and enable automatic fallback when desired. Upgrades preserve saved settings.
 
 ### New in 0.3.0: translation-only mode
 
@@ -252,8 +266,8 @@ After installation, a blue **译** button appears in the bottom-right corner of 
 | Click **译** again | Restore the original page by removing only the translation nodes added by the script |
 | Right-click **译** or press `Alt+O` | Open settings for provider, language, site-level auto-translation, and disabling the site |
 | Enable **Show translation only** | Hide the original and show only the translation; disable it to return to bilingual mode |
-| Hover a translation | Read the original; can be disabled in settings |
-| Save translation cache locally | Reuse after reload, expire after seven days; can be disabled or cleared |
+| Hover a translation | Off by default; enable it in settings to read the original |
+| Save translation cache locally | Off by default; enable it to reuse after reload, expire after seven days, or clear it manually |
 | Select text | A small **译** button appears; click it to translate the selection and copy the result |
 | `Alt+T` | Translate / restore the current page |
 | `Alt+O` | Open the settings panel |
@@ -268,9 +282,9 @@ You can change the shortcuts under **Shortcuts & Maintenance** in the panel.
 | Microsoft Edge web translation | Keyless | Default primary provider; automatic source detection; batched requests |
 | DeepL | Free tier around 500k characters/month; API key required | Optional high-quality provider; keys ending in `:fx` use the free endpoint automatically |
 | Google web translation | Keyless | Whole-page POST batches, automatic routing or manual choice; unreachable on some networks |
-| MyMemory | Keyless; about 5,000 anonymous characters/day | Lower quality; not used automatically unless **Allow low-quality MyMemory fallback** is enabled |
+| MyMemory | Keyless; about 5,000 anonymous characters/day | Lower quality; fallback permission is on by default, but automatic fallback must also be enabled; manual selection is available |
 
-Automatic mode chooses between **Microsoft and Google**, preferring the route that last succeeded on the current page. If both fail, a configured DeepL key can be used. MyMemory requires explicit low-quality fallback permission. Pin a provider or disable automatic fallback to prevent speculative requests.
+Microsoft is selected by default, with automatic fallback off. Select automatic mode and enable automatic fallback to choose between **Microsoft and Google**, preferring the route that last succeeded on the current page. If both fail, a configured DeepL key can be used. MyMemory participates only when low-quality fallback is allowed. Disabling automatic fallback prevents backup requests.
 
 These providers are web frontend endpoints, not official developer APIs with an SLA. They may change or stop working at any time. PageLingo isolates the adapters, validates response formats, and provides manual switching and retries, but cannot guarantee long-term availability.
 
@@ -298,11 +312,11 @@ The key is stored only in the userscript manager's local storage and is sent onl
 - **One display update**: buffer successful results until the current round settles, including cache hits. Check source text and generation again before the final DOM update.
 - **Attempt budget**: each batch gets at most 3 provider attempts, including retries and fallback. Requests split from a long text do not count as additional attempts, but follow the same request interval and timeout rules.
 - **Error handling**: automatic racing switches routes directly on network errors or 5xx; fixed providers retry once. 413/414 can retry smaller batches. Honor `Retry-After` on 429; pause after 401/403 or protocol errors; trip a circuit breaker after repeated failures; cool down for one hour on DeepL quota exhaustion (HTTP 456).
-- **Quality first**: MyMemory is excluded from automatic fallback unless the user enables low-quality fallback explicitly.
+- **Fallback controls**: automatic fallback is off by default. When enabled, MyMemory participation follows the low-quality fallback permission, which is on by default.
 - **Layout protection**: translations inside flex/grid containers move to a separate row; spaces are inserted at link and block boundaries before translation to avoid `HomeDocsAbout`-style input errors.
 - **Fragment coalescing**: short `span` tokens inside flex/grid layouts are merged into one complete translation unit, avoiding word-by-word requests and translations.
 - **Reversible translation-only mode**: source content is moved into a temporary hidden container, not deleted. Restoring, switching modes, or retranslating unwraps the original nodes so the page is not left blank or with duplicate DOM.
-- **Cache and deduplication**: an LRU cache holds about 1,000 entries or 2 MiB, persists in userscript-manager storage by default, and expires after seven days. Cache keys isolate origin, language, and provider policy. Without GM storage, cache only in memory.
+- **Cache and deduplication**: an LRU cache holds about 1,000 entries or 2 MiB. Local persistence is off by default; enable it to save in userscript-manager storage with seven-day expiration. Cache keys isolate origin, language, and provider policy. Without GM storage, cache only in memory.
 - **Page safety**: original nodes stay in place; only plain-text translation nodes are appended; translations are written with `textContent` only, so provider output is never executed as HTML.
 - **Dynamic pages**: `MutationObserver` batches new content for incremental scanning; SPA route changes cancel old jobs and trigger a rescan; generation, node connectivity, and source fingerprints are checked before rendering so stale translations do not attach to new content.
 - **Content change protection**: if the same block changes more than 3 times within 30 seconds, automatic re-translation pauses to avoid fighting a live-updating page.
@@ -317,7 +331,7 @@ The key is stored only in the userscript manager's local storage and is sent onl
 - Password fields, input fields, editable areas, and code blocks do not enter the translation queue automatically.
 - A DeepL key is stored only in the userscript manager's storage, not in page storage or logs; saved keys are not refilled into the page input and the settings UI uses a closed Shadow DOM.
 - Translation-only mode hides source DOM locally; it does not delete or upload the original content.
-- Translation cache includes source and translated text, stored locally in the userscript manager by default and expiring after seven days. Disable local caching to clear saved entries. Settings are also stored in the userscript manager.
+- Translation cache stays in the current page's memory by default. Enable local caching to save source and translated text in the userscript manager with seven-day expiration; disabling it clears saved entries. Settings are stored in the userscript manager.
 - The script contains no analytics, reporting, or remote configuration.
 
 ### Known limitations
@@ -361,7 +375,7 @@ Checks performed locally on 2026-10-22:
 
 ### Implementation notes
 
-To keep installation and distribution simple, v0.7.0 is a single `.user.js` file with no build step. The file is organized into settings, requests, provider adapters, extraction, scheduling, rendering, and UI sections.
+To keep installation and distribution simple, v0.7.1 is a single `.user.js` file with no build step. The file is organized into settings, requests, provider adapters, extraction, scheduling, rendering, and UI sections.
 
 Development checks use Node.js and Playwright: `npm ci`, `npm run check`, `npm test`, and `npm run bench`. Tests prefer a local Edge installation or `PAGELINGO_BROWSER_PATH`. Without Edge, first run `npx playwright install chromium`. Requests are mocked; benchmark results are written to `tests/results/benchmark.json`. See [tests/README.md](tests/README.md).
 

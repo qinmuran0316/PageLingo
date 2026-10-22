@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PageLingo — 双语网页翻译
 // @namespace    https://github.com/qinmuran0316/PageLingo
-// @version      0.7.0
+// @version      0.7.1
 // @description  PageLingo：用微软 / DeepL / Google / MyMemory 翻译网页，支持双语对照、仅译文、划词翻译和快捷键
 // @author       qinmuran0316
 // @license      MIT
@@ -34,7 +34,7 @@
   if (window.__EDGE_TRANSLATOR_LOADED__) return;
   window.__EDGE_TRANSLATOR_LOADED__ = true;
 
-  const VERSION = '0.7.0';
+  const VERSION = '0.7.1';
   const HOST_ID = 'et-translator-host';
   const STYLE_ID = 'et-page-style';
   const SETTINGS_KEY = 'et:settings:v1';
@@ -150,15 +150,15 @@
 
   const DEFAULTS = {
     schemaVersion: 4,
-    provider: 'auto',
+    provider: 'microsoft',
     targetLang: 'zh-CN',
-    autoFallback: true,
-    allowLowQuality: false,
+    autoFallback: false,
+    allowLowQuality: true,
     selection: true,
     fullPage: false,
-    translationOnly: false,
-    showOriginal: true,
-    persistentCache: true,
+    translationOnly: true,
+    showOriginal: false,
+    persistentCache: false,
     deeplKey: '',
     shortcuts: { toggle: 'Alt+T', panel: 'Alt+O' },
     position: null,

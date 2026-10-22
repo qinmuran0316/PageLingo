@@ -50,7 +50,10 @@ async function fixture(browser, html, { settings = {}, mock = {}, source, viewpo
       window.__calls = [];
       window.__writes = [];
       window.__store = { 'et:settings:v1': JSON.stringify({
-        schemaVersion: 4, provider: 'microsoft', targetLang: 'zh-CN', autoFallback: false, ...settings,
+        // Keep feature scenarios explicit when installation defaults change.
+        schemaVersion: 4, provider: 'microsoft', targetLang: 'zh-CN', autoFallback: false,
+        allowLowQuality: false, translationOnly: false, showOriginal: true, persistentCache: true,
+        ...settings,
       }), ...stored };
       window.GM_getValue = mock.noGMStorage ? undefined : (key, fallback) => window.__store[key] ?? fallback;
       window.GM_setValue = mock.noGMStorage ? undefined : (key, value) => {
