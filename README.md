@@ -2,7 +2,7 @@
 
 **让网页以两种语言展开。 / Read the web in two languages.**
 
-`v0.7.2` · 单文件用户脚本 · Tampermonkey / ScriptCat
+`v0.8.0` · 单文件用户脚本 · Tampermonkey / ScriptCat
 
 [简体中文](#简体中文) · [English](#english)
 
@@ -14,9 +14,17 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 
 点击页面边缘的「译」按钮，即可翻译网页，默认只显示中文译文；取消「仅显示译文」可恢复双语对照，再次点击按钮恢复原文。
 
-当前版本：`0.7.2`。直接查看安装文件：[edge-translator.user.js](edge-translator.user.js)。
+当前版本：`0.8.0`。直接查看安装文件：[edge-translator.user.js](edge-translator.user.js)。
 
 > 从 v0.1 升级：v0.2 的脚本名称和 `@namespace` 已改为 PageLingo。安装前请先在 Tampermonkey / ScriptCat 中禁用或删除旧的「双语网页翻译（Edge）」脚本，避免管理器里保留两份。v0.2 已加入 `@updateURL`，之后可在脚本管理器中检查更新。
+
+### v0.8.0：补齐导航、短词和界面提示
+
+- **减少漏译**：导航、侧栏、按钮、菜单、标签页、单字母短标签，以及大段落前后的零散文字均纳入提取；中文页面中的英文、日文和韩文不再因页面语言标记而被跳过。
+- **界面提示也能翻译**：覆盖搜索框/文本框的占位提示、悬停提示、图标按钮的无障碍标签、图片替代文字、提交按钮文字和下拉选项。输入内容、密码、选项提交值、代码和可编辑区保持原样。
+- **动态内容继续补齐**：展开菜单、更新搜索提示或改变下拉选项后继续翻译；隐藏区域在显示后处理。网站在请求期间改写原文时，不用旧译文覆盖新内容。
+- **保留批量速度**：界面提示与正文共用批量队列、去重、缓存和统一显示；关闭强制整页时，它们也遵守大页面只翻译当前屏幕的范围。
+- **控件排版与还原**：导航链接和按钮的译文保持紧凑显示，保留按钮图标；仅译文模式保留代码及明确不翻译的部分，恢复时还原节点顺序和属性。
 
 ### v0.7.2：默认开启强制整页
 
@@ -37,7 +45,7 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 - **对比实测**：与 v0.6.0 各交替运行 3 次，在每次 600ms 的模拟网络下，Google 24 段从 24 次请求、约 9.85 秒降为 1 次、约 0.62 秒。真实 Google POST 120 段已返回 HTTP 200 和完整译文，单次约 3.9 秒。模拟数字不代表真实网络速度。
 - **保留已有优化**：两个批次并发、划词优先、取消与重试、免费 Key 保护、接口隔离缓存和动态内容清理继续生效。
 
-升级后确认版本为 **0.7.2**，刷新网页。右键“译”可调整设置；需要自动择快时，将接口设为「自动择快（推荐）」并开启「接口失败时自动回退」。已有设置不会被升级覆盖。
+升级后确认版本为 **0.8.0**，刷新网页。右键“译”可调整设置；需要自动择快时，将接口设为「自动择快（推荐）」并开启「接口失败时自动回退」。已有设置不会被升级覆盖。
 
 ### v0.3.0 新增：仅译文模式
 
@@ -73,7 +81,7 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 | 操作 | 说明 |
 | --- | --- |
 | 点击「译」 | 默认翻译整页，包含导航和侧栏；关闭强制整页后，大页面只翻译当前屏幕，滚动后继续 |
-| 再次点击「译」 | 恢复原文，只删除脚本插入的译文节点 |
+| 再次点击「译」 | 恢复原文，移除译文和临时容器，还原提示属性 |
 | 右键「译」或 `Alt+O` | 打开面板，选择接口、目标语言、站点自动翻译、禁用网站等 |
 | 勾选「仅显示译文」 | 隐藏原文，只显示译文；取消勾选恢复双语 |
 | 悬停译文 | 默认关闭；在面板开启后可显示原文 |
@@ -109,12 +117,12 @@ Key 只保存在脚本管理器本地存储中，只会发送给 DeepL 官方端
 ### 覆盖模式
 
 - **强制整页模式（默认）**：包含导航、页脚和侧栏，跳过大页面的自适应范围限制；部分网站的顶部栏布局可能发生变化。
-- **正文模式**：在面板中取消勾选「强制整页（含导航/侧栏）」，跳过导航、页脚、侧栏、按钮、菜单、代码块和表单控件，并按页面规模自适应处理范围。
-- 无论哪种模式，原文节点都保持原位，恢复时只移除脚本插入的译文节点。
+- **自适应范围模式**：取消勾选「强制整页（含导航/侧栏）」后，仍覆盖导航和控件文字；普通页面整页翻译，大页面仅翻译当前屏幕，滚动后继续。
+- 两种模式都保留原文节点；恢复时移除译文、解开临时容器，并还原提示属性。
 
 ### 稳定性设计
 
-- **通用文本块识别**：根据实际布局寻找叶子文本块，覆盖 `div`、`span`、`section` 和自定义元素；跳过 `pre`、`code`、按钮、表单控件、密码框、`contenteditable` 和 `translate="no"`。默认包含导航和页脚，关闭强制整页后跳过。
+- **通用文本块识别**：根据布局提取正文和界面短词，包含导航、页脚、按钮、行内文字及常见提示属性；跳过 `pre`、`code`、表单输入值、密码、`contenteditable` 和 `translate="no"`。
 - **自适应范围**：关闭强制整页后，先统计候选文本块；不超过 160 块且约 32000 字符时整页处理，大页面用 `IntersectionObserver` 只处理当前屏幕。动态增长的页面达到阈值后同样切换范围。
 - **批量与限速**：微软和 Google 每批最多 128 段、约 24000 字符，DeepL 最多 50 段、约 24000 字符；页面最多并发 2 个逻辑批次，每接口最多 2 个请求（MyMemory 1 个）。自动择快可能同时使用两条线路；同接口间隔初始为 250ms（Google 400ms，MyMemory 1000ms），请求超时 10 秒，429 后冷却。
 - **划词优先**：划词请求会在接口队列中优先于普通页面批次，减少手动翻译等待。
@@ -152,7 +160,7 @@ Key 只保存在脚本管理器本地存储中，只会发送给 DeepL 官方端
 - 免费接口可能限流、变更或在特定网络不可达；自动模式可以减少慢线路等待，但两条线路都不可达时仍会失败。固定接口仍受其自身响应速度限制。
 - DeepL 需要用户自己的 API Key；脚本不会创建或升级 DeepL 付费账户。
 - 关闭强制整页后，大型单页应用、虚拟列表和频繁改写的页面达到规模阈值时会自动只处理当前屏幕，仍可能需要站点级排除规则；当前版本没有图形化的站点规则编辑器。
-- 仅译文模式会隐藏原文块内的链接和图片；需要点击正文链接或查看图片时请切回双语模式。少数依赖直接子节点的网页脚本可能在隐藏/恢复期间表现异常。
+- 仅译文模式会隐藏合并正文块内的链接；需要点击这类正文链接时请切回双语模式。单独翻译的导航链接和按钮可继续使用，图片、代码和明确不翻译的内容会保留。少数依赖直接子节点的网页脚本可能在隐藏/恢复期间表现异常。
 - 多标签页同时翻译时，各标签页独立限流；不会造成单页请求风暴，但不是全局配额管理。
 
 ### 验证记录
@@ -181,11 +189,12 @@ Key 只保存在脚本管理器本地存储中，只会发送给 DeepL 官方端
 - **整页速度（v0.6）**：120 个短段落、600ms 模拟请求、3 轮交替测试，完整显示中位耗时由 v0.5.0 的 1473ms 降到约 640ms；请求从 4 次减到 1 次。旧版依次显示 32/64/96/120 段，新版一次显示 120 段。
 - **真实微软大批次冒烟**：120 条公开测试句，单次请求返回 HTTP 200，译文数量与非空字段均正确；本次约 3.2 秒。真实接口耗时不能与固定延迟模拟结果等同。
 - **v0.7.0 回归**：仓库内保留 57 个浏览器测试，增加 Google 真批量、响应数量和空值校验、自动择快及取消、缓存跨刷新复用/到期/关闭/清除、零请求显示切换和单击操作等断言。
+- **v0.8.0 覆盖与速度（2026-10-23）**：79 项浏览器回归通过。针对 GitHub 风格界面构建的 20 项文字模拟夹具中，v0.7.2 提取 5 项，v0.8.0 提取全部 20 项，两版均为一次批量请求；该结果不代表所有网站的覆盖率。与 v0.7.2 交替运行 3 轮，120 段正文在 600ms 模拟响应下的完整显示中位耗时均约 635ms。另以 8 个公开界面词测试真实微软端点，HTTP 200、返回完整译文，约 0.85 秒；真实速度随网络变化。
 - 尚未在真实 Tampermonkey / ScriptCat 扩展中完成安装、权限和升级验收，也尚未用真实 DeepL Key 调用；这是发布前剩余的人工测试。
 
 ### 实现说明
 
-为了安装和分发简单，v0.7.2 使用单个 `.user.js` 文件，不依赖构建工具。文件内按“设置 / 请求 / 接口适配 / 提取 / 调度 / 渲染 / 界面”分段组织。
+为了安装和分发简单，v0.8.0 使用单个 `.user.js` 文件，不依赖构建工具。文件内按“设置 / 请求 / 接口适配 / 提取 / 调度 / 渲染 / 界面”分段组织。
 
 开发验证使用 Node.js 和 Playwright，不影响用户安装。运行 `npm ci`、`npm run check`、`npm test`；速度对比运行 `npm run bench`。测试会优先使用本机 Edge，也可通过 `PAGELINGO_BROWSER_PATH` 指定浏览器；没有 Edge 时先执行 `npx playwright install chromium`。自动化使用模拟接口，基准报告写入 `tests/results/benchmark.json`；详见 [tests/README.md](tests/README.md)。
 
@@ -204,9 +213,17 @@ PageLingo (Bilingual Web Page Translation) is a single-file userscript for Micro
 
 Click the **译** button at the edge of a page to translate it into Chinese. Translation-only mode is enabled by default; disable it for bilingual reading, or click the button again to restore the original page.
 
-Current version: `0.7.2`. View the userscript file: [edge-translator.user.js](edge-translator.user.js).
+Current version: `0.8.0`. View the userscript file: [edge-translator.user.js](edge-translator.user.js).
 
 > Upgrading from v0.1: v0.2 changes both the script name and `@namespace` to PageLingo. Disable or remove the old **双语网页翻译（Edge）** script in Tampermonkey / ScriptCat before installing v0.2 so the manager does not keep two copies. v0.2 includes `@updateURL`, so later versions can be checked from the userscript manager.
+
+### New in 0.8.0: translate navigation, short labels, and interface hints
+
+- **Broader coverage**: include navigation, sidebars, buttons, menus, tabs, single-letter labels, inline siblings, and loose text around large blocks. Chinese page metadata no longer suppresses English, Japanese, or Korean text.
+- **Interface hints**: translate placeholders, tooltips, accessible labels, image alternative text, submit captions, and option labels. Typed values, passwords, submitted option values, code, and editable content stay unchanged.
+- **Dynamic updates**: translate menus when opened and refresh changed hints or option labels. Hidden regions wait until shown; stale responses cannot overwrite newer site content.
+- **Shared batching**: interface hints use the same batching, deduplication, cache, and render commit as ordinary text, including viewport limits on large pages when forced full-page mode is off.
+- **Controls and restoration**: keep navigation and button translations compact, preserve icons and protected content, and restore original attributes and node order.
 
 ### New in 0.7.2: force full page by default
 
@@ -227,14 +244,14 @@ Current version: `0.7.2`. View the userscript file: [edge-translator.user.js](ed
 - **Measured completion time**: three alternating runs against v0.6.0, 24 Google paragraphs and 600ms simulated requests: about 9.85s / 24 requests became 0.62s / one request. A separate live Google POST returned all 120 translations with HTTP 200 in about 3.9s. Simulated timings do not predict real network speed.
 - **Existing protections remain**: two concurrent page batches, selection priority, cancellation, free-key protection, provider-aware cache, and dynamic-node cleanup.
 
-After upgrading, confirm **0.7.2** and reload the target page. Right-click **译** to adjust settings; select automatic routing and enable automatic fallback when desired. Upgrades preserve saved settings.
+After upgrading, confirm **0.8.0** and reload the target page. Right-click **译** to adjust settings; select automatic routing and enable automatic fallback when desired. Upgrades preserve saved settings.
 
 ### New in 0.3.0: translation-only mode
 
 - Enable **Show translation only (hide original)** in the panel to hide the source text and read only the translation, closer to Immersive Translate's translation-only reading mode.
 - Original nodes, links, and hrefs remain in the page in a temporary hidden container. Unchecking the option or clicking **Restore original** brings them back completely.
 - Bilingual/translation-only changes update the existing display immediately. Language, provider, and scope changes rescan with the new policy and reuse matching cached translations.
-- Images, links, and interactive content inside a translated block are hidden with the source. Switch back to bilingual mode when you need to click inline links.
+- Inline links merged into a translated paragraph are hidden with the source; switch to bilingual mode to use them. Independently translated navigation links and buttons stay usable, while images, code, and protected content remain visible.
 
 ### What's new in 0.2.0
 
@@ -263,7 +280,7 @@ After installation, a blue **译** button appears in the bottom-right corner of 
 | Action | Description |
 | --- | --- |
 | Click **译** | Translate the whole page, including navigation and sidebars, by default; disable forced full-page mode to translate large pages one viewport at a time |
-| Click **译** again | Restore the original page by removing only the translation nodes added by the script |
+| Click **译** again | Restore source text and hint attributes, removing translations and temporary wrappers |
 | Right-click **译** or press `Alt+O` | Open settings for provider, language, site-level auto-translation, and disabling the site |
 | Enable **Show translation only** | Hide the original and show only the translation; disable it to return to bilingual mode |
 | Hover a translation | Off by default; enable it in settings to read the original |
@@ -299,12 +316,12 @@ The key is stored only in the userscript manager's local storage and is sent onl
 ### Coverage modes
 
 - **Forced full-page mode (default)**: includes navigation, footers, and sidebars and bypasses the large-page adaptive limit. Some site headers or menus may change layout.
-- **Content mode**: disable **Force full page (including navigation/sidebar)** in the panel to skip navigation, footers, sidebars, buttons, menus, code blocks, and form controls and adapt scope to the page size.
-- In both modes, original nodes stay in place; restoring removes only translation nodes created by PageLingo.
+- **Adaptive scope**: disable **Force full page (including navigation/sidebar)** to translate normal pages in full and large pages one viewport at a time. Navigation and control captions remain included.
+- Both modes preserve source nodes. Restoration removes translations, unwraps temporary containers, and restores hint attributes.
 
 ### Reliability and safety design
 
-- **Generic block detection**: find leaf text blocks from rendered layout, covering `div`, `span`, `section`, and custom elements; skip `pre`, `code`, buttons, form controls, password fields, `contenteditable`, and `translate="no"`. Navigation and footers are included by default and skipped when forced full-page mode is off.
+- **Generic block detection**: extract body text, navigation, footers, buttons, inline labels, and common hint attributes; skip `pre`, `code`, typed form values, passwords, `contenteditable`, and `translate="no"`.
 - **Adaptive scope**: with forced full-page mode off, pages with up to 160 blocks and about 32,000 characters enter one whole-page queue; large pages use `IntersectionObserver` for the current screen only. Growing documents also switch scope when they reach the threshold.
 - **Batching and rate limiting**: Microsoft and Google batch up to 128 segments / 24,000 characters; DeepL up to 50 / 24,000. Up to two logical page batches run concurrently, with up to two requests per provider (one for MyMemory). Automatic routing may use two providers at once. Starts stay 250ms apart per provider (Google 400ms, MyMemory 1,000ms), with a 10-second timeout.
 - **Selection priority**: selection requests move ahead of ordinary page batches in a provider queue.
@@ -342,7 +359,7 @@ The key is stored only in the userscript manager's local storage and is sent onl
 - Free providers may rate-limit, change, or become unreachable. Automatic routing reduces waits for a slow route, but fails if both are unreachable. A fixed provider remains limited by its own response speed.
 - DeepL requires your own API key; PageLingo does not create or upgrade paid DeepL accounts.
 - With forced full-page mode off, large single-page apps, virtualized lists, and frequently rewritten pages are limited to the current screen after reaching the size threshold, but may still need site-level exclusion rules. There is no graphical site-rule editor in the current version.
-- Translation-only mode hides links and images inside a translated block. Switch back to bilingual mode when you need to click inline links or view images. A few sites whose scripts depend on direct child nodes may behave unexpectedly while content is hidden or restored.
+- Translation-only mode hides inline links merged into a translated paragraph. Switch back to bilingual mode to use those links. Independently translated navigation links and buttons remain usable, and images, code, and protected content stay visible. A few sites whose scripts depend on direct child nodes may behave unexpectedly while content is hidden or restored.
 - When several tabs translate at once, each tab rate-limits independently. This avoids request storms within one page, but is not a global quota manager.
 
 ### Verification notes
@@ -375,7 +392,7 @@ Checks performed locally on 2026-10-22:
 
 ### Implementation notes
 
-To keep installation and distribution simple, v0.7.2 is a single `.user.js` file with no build step. The file is organized into settings, requests, provider adapters, extraction, scheduling, rendering, and UI sections.
+To keep installation and distribution simple, v0.8.0 is a single `.user.js` file with no build step. The file is organized into settings, requests, provider adapters, extraction, scheduling, rendering, and UI sections.
 
 Development checks use Node.js and Playwright: `npm ci`, `npm run check`, `npm test`, and `npm run bench`. Tests prefer a local Edge installation or `PAGELINGO_BROWSER_PATH`. Without Edge, first run `npx playwright install chromium`. Requests are mocked; benchmark results are written to `tests/results/benchmark.json`. See [tests/README.md](tests/README.md).
 

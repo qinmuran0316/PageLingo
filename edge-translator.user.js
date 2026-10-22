@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PageLingo — 双语网页翻译
 // @namespace    https://github.com/qinmuran0316/PageLingo
-// @version      0.7.2
+// @version      0.8.0
 // @description  PageLingo：将英文、日文、韩文等网页内容快速翻译成中文，支持中英日韩多种语言和划词翻译
 // @author       qinmuran0316
 // @license      MIT
@@ -34,7 +34,7 @@
   if (window.__EDGE_TRANSLATOR_LOADED__) return;
   window.__EDGE_TRANSLATOR_LOADED__ = true;
 
-  const VERSION = '0.7.2';
+  const VERSION = '0.8.0';
   const HOST_ID = 'et-translator-host';
   const STYLE_ID = 'et-page-style';
   const SETTINGS_KEY = 'et:settings:v1';
@@ -113,6 +113,7 @@
     '[role="textbox"]',
     '[aria-hidden="true"]',
     '[hidden]',
+    '[inert]',
     'svg',
     'math',
     'canvas',
@@ -121,19 +122,13 @@
     'embed',
     'audio',
     'video',
-    'button',
-    '[role="button"]',
-    '[role="tab"]',
-    '[role="menuitem"]',
-    '[role="menu"]',
-    '[role="menubar"]',
-    'summary',
   ].join(',');
-  const CHROME_SELECTOR = 'nav,aside,footer,header,[role="navigation"],[role="banner"],[role="contentinfo"]';
   const TEXT_FLOW_TAGS = new Set([
     'P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'TD', 'TH', 'DD', 'DT',
     'BLOCKQUOTE', 'FIGCAPTION', 'CAPTION', 'LABEL',
   ]);
+  const INTERACTIVE_SELECTOR = 'a,button,input,select,textarea,summary,[role="button"],[role="tab"],[role="menuitem"]';
+  const PAGE_CHROME_SELECTOR = 'nav,header,aside,footer,[role="navigation"],[role="menu"],[role="menubar"],[role="tablist"]';
   const INLINE_ORIGIN_TAGS = new Set([
     'A', 'SPAN', 'STRONG', 'B', 'EM', 'I', 'U', 'S', 'SMALL', 'MARK',
     'ABBR', 'TIME', 'CITE', 'Q', 'DEL', 'INS', 'LABEL',
@@ -1208,6 +1203,8 @@
     failedElements: new Set(),
     translations: new Set(),
     sourceWrappers: new Set(),
+    textRuns: new Set(),
+    attributeTargets: new Set(),
     stats: { total: 0, done: 0, failed: 0 },
   };
 
@@ -1216,7 +1213,8 @@
     subtree: true,
     characterData: true,
     attributes: true,
-    attributeFilter: ['hidden', 'aria-hidden', 'class', 'style', 'translate', 'lang'],
+    attributeFilter: ['hidden', 'aria-hidden', 'class', 'style', 'translate', 'lang',
+      'open', 'inert', 'contenteditable', 'type', 'title', 'aria-label', 'placeholder', 'alt', 'value', 'label'],
   };
 
   let mutationPauseDepth = 0;
@@ -1247,6 +1245,65 @@
   const pendingScanRoots = new Set();
   const recheckTimers = new WeakMap();
   let changeGuard = new WeakMap();
+  let attributeOwners = new WeakMap();
+
+  function attributeSupported(el, name) {
+    if (el.matches('input') && ['password', 'hidden'].includes(el.type)) return false;
+    if (name === 'value') return el.matches('input') && ['button', 'submit', 'reset'].includes(el.type);
+    if (name === 'placeholder') return el.matches('input,textarea');
+    if (name === 'label') return el.matches('option,optgroup');
+    if (name === 'alt') return el.matches('img,area');
+    return name === 'title' || name === 'aria-label';
+  }
+
+  function attributeProtected(el) {
+    return !!el.closest('pre,code,kbd,samp,[contenteditable],[translate="no"],.notranslate,[inert]') ||
+      !!el.closest(SITE_SKIP_SELECTOR);
+  }
+
+  // Attribute targets share batching, deduplication, caching, cancellation and
+  // the final render commit with visible text. Never translate an input value
+  // unless it is the caption of a button; user-entered form data stays local.
+  class AttributeTextTarget {
+    constructor(element, attribute) {
+      this.element = element;
+      this.attribute = attribute;
+      this.original = element.getAttribute(attribute);
+      this.translation = null;
+    }
+
+    get isConnected() { return this.element.isConnected; }
+    closest(selector) { return this.element.closest(selector); }
+    getBoundingClientRect() { return this.element.getBoundingClientRect(); }
+
+    read() {
+      if (!attributeSupported(this.element, this.attribute) || attributeProtected(this.element)) return '';
+      const value = this.element.getAttribute(this.attribute);
+      if (this.translation !== null && value === this.translation) return this.original ||
+        (this.attribute === 'label' ? this.element.textContent : '');
+      // Keep the most recent site-provided value for restoration.
+      this.original = value;
+      this.translation = null;
+      return value || (this.attribute === 'label' ? this.element.textContent : '');
+    }
+
+    write(value) {
+      this.element.setAttribute(this.attribute, value);
+      this.translation = value;
+    }
+
+    restore() {
+      if (this.translation !== null && this.element.getAttribute(this.attribute) === this.translation) {
+        if (this.original === null) this.element.removeAttribute(this.attribute);
+        else this.element.setAttribute(this.attribute, this.original);
+      }
+      this.translation = null;
+    }
+  }
+
+  function sourceElement(target) {
+    return target instanceof AttributeTextTarget ? target.element : target;
+  }
 
   function resetSessionState() {
     cancelScan();
@@ -1267,10 +1324,13 @@
     session.failedElements = new Set();
     session.translations = new Set();
     session.sourceWrappers = new Set();
+    session.textRuns = new Set();
+    session.attributeTargets = new Set();
     session.stats = { total: 0, done: 0, failed: 0 };
     elementStates = new WeakMap();
     observed = new WeakSet();
     changeGuard = new WeakMap();
+    attributeOwners = new WeakMap();
     if (session.retryTimer) {
       clearTimeout(session.retryTimer);
       session.retryTimer = 0;
@@ -1279,6 +1339,10 @@
 
   function unwrapSourceWrapper(wrapper) {
     if (!wrapper) return;
+    if (Array.isArray(wrapper)) {
+      for (const part of wrapper) unwrapSourceWrapper(part);
+      return;
+    }
     session.sourceWrappers.delete(wrapper);
     if (!wrapper.parentNode) return;
     withMutationPaused(() => {
@@ -1289,18 +1353,11 @@
   }
 
   function wrapSourceContent(el) {
-    let wrapper = el.querySelector(':scope > .et-source-hidden');
-    if (wrapper) {
-      session.sourceWrappers.add(wrapper);
-      return wrapper;
-    }
-
-    wrapper = document.createElement('span');
-    wrapper.className = 'et-source-hidden';
-    wrapper.setAttribute('aria-hidden', 'true');
-    wrapper.style.setProperty('display', 'none', 'important');
-
+    const existing = Array.from(el.children).filter(child => session.sourceWrappers.has(child));
+    if (existing.length) return existing;
+    const wrappers = [];
     withMutationPaused(() => {
+      let wrapper = null;
       for (const child of Array.from(el.childNodes)) {
         if (
           child.nodeType === 1 &&
@@ -1308,12 +1365,31 @@
         ) {
           continue;
         }
+        // Preserve icons, code, form controls and explicitly untranslated parts.
+        // They are absent from the source sent to the service, so hiding them
+        // would remove information that no translation can replace.
+        if (child.nodeType === 1 && (child.matches(TEXT_SKIP_SELECTOR) || child.matches('img,picture'))) {
+          wrapper = null;
+          continue;
+        }
+        if (child.nodeType === 1 && child.querySelector(TEXT_SKIP_SELECTOR + ',img,picture')) {
+          wrapper = null;
+          wrappers.push(...wrapSourceContent(child));
+          continue;
+        }
+        if (!wrapper) {
+          wrapper = document.createElement('span');
+          wrapper.className = 'et-source-hidden';
+          wrapper.setAttribute('aria-hidden', 'true');
+          wrapper.style.setProperty('display', 'none', 'important');
+          el.insertBefore(wrapper, child);
+          session.sourceWrappers.add(wrapper);
+          wrappers.push(wrapper);
+        }
         wrapper.appendChild(child);
       }
-      el.appendChild(wrapper);
     });
-    session.sourceWrappers.add(wrapper);
-    return wrapper;
+    return wrappers;
   }
 
   function removeTranslationNode(node) {
@@ -1339,6 +1415,15 @@
       const state = elementStates.get(el);
       if (state && state.translationEl) removeTranslationNode(state.translationEl);
     }
+    withMutationPaused(() => {
+      for (const target of session.attributeTargets) target.restore();
+      for (const run of session.textRuns) {
+        while (run.firstChild && run.parentNode) run.parentNode.insertBefore(run.firstChild, run);
+        run.remove();
+      }
+    });
+    session.textRuns.clear();
+    session.attributeTargets.clear();
   }
 
   // ---------------------------------------------------------------------------
@@ -1347,10 +1432,8 @@
 
   const TEXT_SKIP_SELECTOR = [
     '.et-translation', 'script', 'style', 'noscript', 'template', 'pre', 'code',
-    'kbd', 'samp', '[hidden]', '[aria-hidden="true"]', '[translate="no"]',
-    '.notranslate', '[contenteditable]', 'button', '[role="button"]',
-    '[role="tab"]', '[role="menuitem"]', '[role="menu"]', '[role="menubar"]',
-    'summary', 'svg', 'math', 'canvas', 'iframe', 'object', 'embed', 'audio',
+    'kbd', 'samp', '[hidden]', '[inert]', '[aria-hidden="true"]', '[translate="no"]',
+    '.notranslate', '[contenteditable]', 'svg', 'math', 'canvas', 'iframe', 'object', 'embed', 'audio',
     'video', 'textarea', 'input', 'select', 'option',
   ].join(',');
 
@@ -1372,6 +1455,18 @@
       style.visibility === 'collapse' || style.contentVisibility === 'hidden';
   }
 
+  function insideClosedDetails(el) {
+    let parent = el.parentElement;
+    while (parent) {
+      const details = parent.closest('details:not([open])');
+      if (!details) return false;
+      const summary = details.querySelector(':scope > summary');
+      if (!summary || !summary.contains(el)) return true;
+      parent = details.parentElement;
+    }
+    return false;
+  }
+
   function extractNodeText(node, context = textContext()) {
     if (node.nodeType === 3) return node.nodeValue || '';
     if (node.nodeType !== 1) return '';
@@ -1384,6 +1479,7 @@
       (style.display.includes('flex') || style.display.includes('grid'));
     let text = '';
     for (const child of node.childNodes) {
+      if (node.matches('details:not([open])') && child !== node.querySelector(':scope > summary')) continue;
       const fragment = extractNodeText(child, context);
       if (!fragment) continue;
       if (layout && text && child.nodeType === 1) text += ' ';
@@ -1396,27 +1492,24 @@
   }
 
   function getSourceText(el, context) {
+    if (el instanceof AttributeTextTarget) return normalizeText(el.read());
     return normalizeText(extractNodeText(el, context));
-  }
-
-  function isChromeElement(el) {
-    if (settings.fullPage) return false;
-    const chrome = el.closest(CHROME_SELECTOR);
-    return !!chrome && !chrome.closest('main,article,[role="main"]');
   }
 
   function isWorthTranslating(text, el) {
     const value = normalizeText(text);
-    if (value.length < 2 || !/[\p{L}].*[\p{L}]/u.test(value)) return false;
-    // Script/alphabet ratios cannot distinguish French from English or Han variants.
+    // Keep short labels and one-letter words such as “I”, “A”, or “X” in the
+    // queue. Interactive page chrome often consists of very short labels, and
+    // dropping them makes a page look only partially translated.
+    if (value.length < 1 || !/[\p{L}]/u.test(value)) return false;
+    // A Chinese document may contain untranslated English/Japanese/Korean UI.
+    // Language metadata alone must never discard those foreign-script words.
     const langNode = el && el.closest('[lang]');
     const lang = langNode ? (langNode.getAttribute('lang') || '').toLowerCase().replace(/_/g, '-') : '';
     const target = settings.targetLang;
-    if (target === 'zh-CN' && /^(zh-hans(?:-|$)|zh-(cn|sg)$)/.test(lang)) return false;
-    if (target === 'zh-TW' && /^(zh-hant(?:-|$)|zh-(tw|hk|mo)$)/.test(lang)) return false;
-    if (target === 'en' && /^en(?:-|$)/.test(lang)) return false;
-    if (target === 'ja' && /^ja(?:-|$)/.test(lang)) return false;
-    if (target === 'ko' && /^ko(?:-|$)/.test(lang)) return false;
+    const foreignScript = /[^\p{Script=Han}\p{Script=Common}\p{Script=Inherited}]/u.test(value);
+    if (!foreignScript && target === 'zh-CN' && /^(zh-hans(?:-|$)|zh-(cn|sg)$)/.test(lang)) return false;
+    if (!foreignScript && target === 'zh-TW' && /^(zh-hant(?:-|$)|zh-(tw|hk|mo)$)/.test(lang)) return false;
     return true;
   }
 
@@ -1425,7 +1518,6 @@
     if (el === document.body || el === document.documentElement) return false;
     if (el.closest('#' + HOST_ID + ',.et-translation')) return false;
     if (el.closest(SKIP_CLOSEST_SELECTOR) || el.closest(SITE_SKIP_SELECTOR)) return false;
-    if (isChromeElement(el)) return false;
     const state = elementStates.get(el);
     if (state && ['done', 'queued', 'active'].includes(state.status)) return false;
     return isWorthTranslating(getSourceText(el, context), el);
@@ -1446,33 +1538,97 @@
     return false;
   }
 
+  function* attributeCandidates(el, context) {
+    if (el.closest('#' + HOST_ID + ',.et-translation,.et-source-hidden,pre,code,kbd,samp,' +
+      '[contenteditable],[translate="no"],.notranslate,[hidden],[aria-hidden="true"],[inert]') ||
+      el.closest(SITE_SKIP_SELECTOR) || hiddenStyle(readStyle(el, context)) || insideClosedDetails(el)) return;
+    if (el.matches('input[type="password"],input[type="hidden"]')) return;
+    for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+      if (hiddenStyle(readStyle(parent, context))) return;
+    }
+    const names = ['title', 'aria-label'];
+    if (el.matches('input,textarea')) names.push('placeholder');
+    if (el.matches('img,area')) names.push('alt');
+    if (el.matches('input[type="button"],input[type="submit"],input[type="reset"]')) names.push('value');
+    if (el.matches('option,optgroup')) names.push('label');
+    for (const name of names) {
+      if (!attributeSupported(el, name)) continue;
+      if (!el.hasAttribute(name) && !(name === 'label' && el.matches('option'))) continue;
+      let targets = attributeOwners.get(el);
+      if (!targets) { targets = new Map(); attributeOwners.set(el, targets); }
+      let target = targets.get(name);
+      if (!target) { target = new AttributeTextTarget(el, name); targets.set(name, target); }
+      if (!isWorthTranslating(getSourceText(target), el)) continue;
+      session.attributeTargets.add(target);
+      yield target;
+    }
+  }
+
+  function textRun(node) {
+    if (!node.parentElement || !isWorthTranslating(node.nodeValue, node.parentElement)) return null;
+    const run = document.createElement('span');
+    run.className = 'et-text-run';
+    withMutationPaused(() => {
+      node.parentNode.insertBefore(run, node);
+      run.appendChild(node);
+    });
+    session.textRuns.add(run);
+    return run;
+  }
+
+  function* textBlockCandidate(el, context) {
+    if (isEligibleTextBlock(el, context)) yield el;
+    // A sentence may merge inline descendants while their attributes need
+    // independent targets, including options whose visible label is implicit.
+    for (const child of el.querySelectorAll('[title],[aria-label],input,textarea,img,select,option,optgroup')) {
+      yield* attributeCandidates(child, context);
+    }
+  }
+
   function* candidateSteps(root) {
     const base = root && root.nodeType === 9 ? (root.body || root.documentElement) : root;
     if (!base || !base.isConnected || base.nodeType !== 1) return;
     if (base.closest('#' + HOST_ID + ',.et-translation,.et-source-hidden')) return;
     const context = textContext();
-    const skipped = el => el.matches(SKIP_CLOSEST_SELECTOR) || !!el.closest(SITE_SKIP_SELECTOR);
+    for (let ancestor = base; ancestor; ancestor = ancestor.parentElement) {
+      if (hiddenStyle(readStyle(ancestor, context))) return;
+    }
+    const skipped = el => !!el.closest(SKIP_CLOSEST_SELECTOR) || !!el.closest(SITE_SKIP_SELECTOR);
 
     function* childrenOf(el) {
-      for (let child = el.firstElementChild; child; child = child.nextElementSibling) {
-        yield* visit(child);
+      const summary = el.matches('details:not([open])') ? el.querySelector(':scope > summary') : null;
+      for (const child of Array.from(el.childNodes)) {
+        if (el.matches('details:not([open])') && child !== summary) continue;
+        if (child.nodeType === 1) yield* visit(child);
+        else if (child.nodeType === 3) {
+          const run = textRun(child);
+          if (run) yield* visit(run);
+        }
       }
     }
 
     function* visit(el) {
       yield null; // Let discovery yield even in a large tree with no candidates.
-      if (!el.isConnected || skipped(el) || isChromeElement(el)) return;
-      const previous = elementStates.get(el);
-      if (previous && ['done', 'queued', 'active'].includes(previous.status)) return;
+      if (!el.isConnected || insideClosedDetails(el)) return;
       const style = readStyle(el, context);
       if (hiddenStyle(style)) return;
+      yield* attributeCandidates(el, context);
+      if (skipped(el)) {
+        if (el.matches('select')) {
+          for (const option of el.querySelectorAll('option,optgroup')) yield* attributeCandidates(option, context);
+        }
+        return;
+      }
+      const previous = elementStates.get(el);
+      if (previous && ['done', 'queued', 'active'].includes(previous.status)) return;
       if (el === document.body || el === document.documentElement) {
         yield* childrenOf(el);
         return;
       }
-      if (INLINE_DISPLAYS.has(style.display)) {
-        if (el.parentElement === document.body && isEligibleTextBlock(el, context)) yield el;
-        else yield* childrenOf(el);
+      // Keep independently clickable controls in their original elements.
+      if (el.matches(PAGE_CHROME_SELECTOR) || (!TEXT_FLOW_TAGS.has(el.tagName) &&
+        !el.matches(INTERACTIVE_SELECTOR) && el.querySelector(INTERACTIVE_SELECTOR))) {
+        yield* childrenOf(el);
         return;
       }
       const flowText = TEXT_FLOW_TAGS.has(el.tagName);
@@ -1506,7 +1662,7 @@
         if (normalizeText(child.textContent)) blockChildren.push(child);
       }
       if (!blockChildren.length) {
-        if (isEligibleTextBlock(el, context)) yield el;
+        yield* textBlockCandidate(el, context);
         return;
       }
       if (layout && blockChildren.length >= 2) {
@@ -1514,16 +1670,17 @@
         if (blockChildren.every(child => INLINE_ORIGIN_TAGS.has(child.tagName)) &&
           lengths.every(length => length <= 120) &&
           lengths.reduce((sum, length) => sum + length, 0) / lengths.length <= 40) {
-          if (isEligibleTextBlock(el, context)) yield el;
+          yield* textBlockCandidate(el, context);
           return;
         }
       }
       if (directText && (flowText ||
         (blockChildren.length <= 2 && normalizeText(el.textContent).length <= 260))) {
-        if (isEligibleTextBlock(el, context)) yield el;
+        yield* textBlockCandidate(el, context);
         return;
       }
-      for (const child of blockChildren) yield* visit(child);
+      // Include inline siblings and loose text around block children as well.
+      yield* childrenOf(el);
     }
     yield* visit(base);
   }
@@ -1550,7 +1707,7 @@
 
   function observeCandidateInViewport(el) {
     if (!el || !el.isConnected) return;
-    if (session.io) session.io.observe(el);
+    if (session.io) session.io.observe(sourceElement(el));
     else if (isInViewport(el)) enqueueElement(el);
   }
 
@@ -1675,7 +1832,11 @@
         for (const entry of entries) {
           if (!entry.isIntersecting) continue;
           try { session.io.unobserve(entry.target); } catch (err) { /* ignore */ }
-          enqueueElement(entry.target);
+          if (observed.has(entry.target)) enqueueElement(entry.target);
+          const targets = attributeOwners.get(entry.target);
+          if (targets) for (const target of targets.values()) {
+            if (observed.has(target)) enqueueElement(target);
+          }
         }
       },
       { root: null, rootMargin: `${VIEWPORT_MARGIN_PX}px 0px`, threshold: 0 }
@@ -1740,9 +1901,21 @@
       recheckTimers.delete(el);
       if (!session.active || generation !== session.generation || !el.isConnected) return;
       const state = elementStates.get(el);
-      if (!state || state.status === 'paused' || state.status === 'queued' || state.status === 'active') return;
+      if (!state) return;
+      if (el instanceof AttributeTextTarget && (!attributeSupported(el.element, el.attribute) ||
+        attributeProtected(el.element))) {
+        withMutationPaused(() => el.restore());
+        session.renderQueue.delete(el);
+        elementStates.delete(el);
+        session.elements.delete(el);
+        session.failedElements.delete(el);
+        observed.delete(el);
+        return;
+      }
+      if (state.status === 'paused' || state.status === 'queued' || state.status === 'active') return;
       const text = getSourceText(el);
-      if (text === state.text && ((state.translationEl && state.translationEl.isConnected) ||
+      if (text === state.text && ((el instanceof AttributeTextTarget && el.translation !== null) ||
+        (state.translationEl && state.translationEl.isConnected) ||
         session.renderQueue.get(el) === state)) return;
       if (!bumpChangeGuard(el)) {
         state.status = 'paused';
@@ -1804,6 +1977,18 @@
       const next = job.iterator.next();
       if (next.done) { session.cleanupJobs.shift(); continue; }
       const el = next.value;
+      session.textRuns.delete(el);
+      const attributes = attributeOwners.get(el);
+      if (attributes) for (const target of attributes.values()) {
+        target.restore();
+        session.attributeTargets.delete(target);
+        session.renderQueue.delete(target);
+        session.elements.delete(target);
+        session.failedElements.delete(target);
+        elementStates.delete(target);
+        observed.delete(target);
+      }
+      attributeOwners.delete(el);
       if (session.io) session.io.unobserve(el);
       observed.delete(el);
       const state = elementStates.get(el);
@@ -1835,6 +2020,8 @@
     for (const record of records) {
       const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
       if (!target || target.closest('.et-translation,#' + HOST_ID)) continue;
+      const attributes = attributeOwners.get(target);
+      if (attributes) for (const entry of attributes.values()) scheduleRecheck(entry);
       const stateful = findStatefulAncestor(target);
       if (stateful) scheduleRecheck(stateful);
       if (record.type === 'childList') {
@@ -1855,9 +2042,9 @@
         if (root) pendingScanRoots.add(root);
       } else if (record.type === 'attributes') {
         for (const el of session.elements) {
-          if (el !== target && target.contains(el)) scheduleRecheck(el);
+          if (el !== target && target.contains(sourceElement(el))) scheduleRecheck(el);
         }
-        if (!stateful && !isOwnNode(target)) {
+        if (!isOwnNode(target)) {
           const root = mutationRoot(target);
           if (root) pendingScanRoots.add(root);
         }
@@ -1970,10 +2157,13 @@
   }
 
   function readElementLayout(el) {
+    if (el instanceof AttributeTextTarget) return null;
     const style = getComputedStyle(el);
     const parentStyle = el.parentElement ? getComputedStyle(el.parentElement) : null;
     return {
       display: style.display,
+      inline: el.matches(INTERACTIVE_SELECTOR) || INLINE_DISPLAYS.has(style.display) ||
+        isInlineBoxDisplay(style.display),
       direction: style.flexDirection || 'row',
       parentLayout: !!parentStyle &&
         (parentStyle.display.includes('flex') || parentStyle.display.includes('grid')),
@@ -1996,16 +2186,17 @@
     }
 
     const layout = state.layout || readElementLayout(el);
+    node.dataset.inline = String(layout.inline);
     const parent = el.parentElement;
     const isFlex = layout.display.includes('flex');
     const isGrid = layout.display.includes('grid');
-    const keepInside = el.matches('td,th,li') || !parent || layout.parentLayout;
+    const keepInside = el.matches('td,th,li,' + INTERACTIVE_SELECTOR) || !parent || layout.parentLayout;
 
     if ((isFlex || isGrid) && !keepInside) {
       parent.insertBefore(node, el.nextSibling);
     } else {
       el.appendChild(node);
-      if (isFlex || isGrid) {
+      if ((isFlex || isGrid) && !layout.inline) {
         node.style.flexShrink = '1';
         node.style.width = '100%';
         if (isGrid) {
@@ -2030,6 +2221,11 @@
   function writeElementTranslation(el, state) {
     const values = state.results.filter((value) => typeof value === 'string' && value.trim());
     if (!values.length) return;
+    if (el instanceof AttributeTextTarget) {
+      if (state.status === 'done' && attributeSupported(el.element, el.attribute) &&
+        !attributeProtected(el.element)) el.write(values.join(' '));
+      return;
+    }
     const node = state.translationEl && state.translationEl.isConnected
       ? state.translationEl
       : (ensureTranslationNode(el, state), state.translationEl);
@@ -2515,6 +2711,15 @@
   text-align: start !important;
 }
 .et-translation[data-state="error"] { border-left-color: rgba(220,80,80,.75) !important; }
+.et-translation[data-inline="true"] {
+  display: inline !important;
+  margin: 0 0 0 .35em !important;
+  padding: 0 !important;
+  border-left: 0 !important;
+  font-size: inherit !important;
+  line-height: inherit !important;
+  white-space: normal !important;
+}
 h1 > .et-translation { font-size: .52em !important; font-weight: 500 !important; }
 h2 > .et-translation { font-size: .6em !important; font-weight: 500 !important; }
 h3 > .et-translation { font-size: .7em !important; font-weight: 500 !important; }

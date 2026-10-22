@@ -32,6 +32,315 @@ check('bilingual restore preserves links and excludes code, forms and editors',
     assert.equal(await page.locator('main').innerHTML(), before);
   });
 
+check('visible navigation and interactive controls are translated',
+  '<header><nav><a href="/home">Home</a><button type="button">Settings</button>' +
+  '<span role="tab">Overview</span></nav></header>' +
+  '<aside><details open><summary>More options</summary><p>Account preferences</p></details></aside>' +
+  '<main><h1>Page title</h1></main>', {}, async page => {
+    await start(page, 6);
+    const result = await inspect(page);
+    const sent = result.calls.flatMap(call => call.texts);
+    for (const text of ['Home', 'Settings', 'Overview', 'More options', 'Account preferences', 'Page title']) {
+      assert.ok(sent.some(value => value.includes(text)), `missing ${text}`);
+    }
+    assert.equal(result.translated, 6);
+  });
+
+check('inline labels, single letters and loose text around large blocks are all collected',
+  'Loose body text.<section id="mixed">Surrounding introduction. ' +
+  '<span>Inline sibling label</span><p>' + 'Long English paragraph. '.repeat(20) + '</p>' +
+  '<p>Second paragraph.</p><p>Third paragraph.</p>Trailing explanation.</section>' +
+  '<nav><span>I</span><span>A</span><span>Docs</span></nav>', {}, async page => {
+    const before = await page.locator('body').innerHTML();
+    await start(page);
+    const sent = (await inspect(page)).calls.flatMap(call => call.texts);
+    for (const text of ['Loose body text.', 'Surrounding introduction.', 'Inline sibling label',
+      'Trailing explanation.', 'I', 'A', 'Docs']) {
+      assert.ok(sent.some(value => value.includes(text)), `missing ${text}`);
+    }
+    assert.equal((await inspect(page)).calls.length, 1);
+    await page.evaluate(() => window.__TEST.stopTranslation());
+    assert.equal(await page.locator('body').innerHTML(), before);
+  });
+
+check('Chinese page metadata does not suppress foreign or mixed-language text',
+  '<main lang="zh-CN"><p>Settings</p><p>高级 Advanced settings</p>' +
+  '<p>アカウント設定</p><p>계정 설정</p><p>已经是中文</p></main>', {}, async page => {
+    await start(page, 4);
+    assert.deepEqual((await inspect(page)).calls[0].texts,
+      ['Settings', '高级 Advanced settings', 'アカウント設定', '계정 설정']);
+  });
+
+check('English page metadata does not suppress French content when targeting English',
+  '<main lang="en"><p>Bonjour tout le monde.</p></main>',
+  { settings: { targetLang: 'en' } }, async page => {
+    await start(page);
+    assert.deepEqual((await inspect(page)).calls[0].texts, ['Bonjour tout le monde.']);
+  });
+
+check('tooltips, placeholders, accessible labels and option captions share one text batch',
+  '<main><p>Page introduction.</p>' +
+  '<input id="search" placeholder="Search repositories" aria-label="Site search" value="PRIVATE_INPUT">' +
+  '<input type="password" placeholder="PRIVATE_PASSWORD"><input hidden placeholder="PRIVATE_HIDDEN">' +
+  '<input id="submit" type="submit" value="Save changes">' +
+  '<textarea id="comment" placeholder="Write a comment">PRIVATE_COMMENT</textarea>' +
+  '<img id="photo" alt="Profile picture">' +
+  '<a id="help" href="/help" title="Read documentation">Help</a>' +
+  '<button id="menu" aria-label="Open menu"><svg width="16" height="16"></svg></button>' +
+  '<select id="visibility"><option value="public">Public</option><option>Private</option></select>' +
+  '<div contenteditable="true" title="PRIVATE_EDITOR">PRIVATE_EDITOR</div></main>',
+  { settings: { translationOnly: true } }, async page => {
+    const before = await page.locator('main').innerHTML();
+    await start(page);
+    const result = await inspect(page);
+    assert.equal(result.calls.length, 1);
+    assert.ok(!result.calls[0].texts.some(text => text.includes('PRIVATE_')));
+    for (const [selector, name, text] of [
+      ['#search', 'placeholder', 'Search repositories'], ['#search', 'aria-label', 'Site search'],
+      ['#submit', 'value', 'Save changes'], ['#comment', 'placeholder', 'Write a comment'],
+      ['#photo', 'alt', 'Profile picture'], ['#help', 'title', 'Read documentation'],
+      ['#menu', 'aria-label', 'Open menu'],
+    ]) assert.equal(await page.locator(selector).getAttribute(name), `microsoft/zh-Hans::${text}`);
+    assert.equal(await page.locator('#search').inputValue(), 'PRIVATE_INPUT');
+    assert.equal(await page.locator('#comment').inputValue(), 'PRIVATE_COMMENT');
+    assert.deepEqual(await page.locator('option').evaluateAll(options => options.map(option =>
+      ({ label: option.label, value: option.value }))), [
+      { label: 'microsoft/zh-Hans::Public', value: 'public' },
+      { label: 'microsoft/zh-Hans::Private', value: 'Private' },
+    ]);
+    await page.evaluate(() => window.__TEST.stopTranslation());
+    assert.equal(await page.locator('main').innerHTML(), before);
+  });
+
+check('repeated attribute and visible text are deduplicated together',
+  '<main><button title="Settings" aria-label="Settings">Settings</button>' +
+  '<input placeholder="Settings"><input type="submit" value="Settings"></main>', {}, async page => {
+    await start(page);
+    assert.deepEqual((await inspect(page)).calls[0].texts, ['Settings']);
+    assert.equal(await page.locator('input[type="submit"]').inputValue(), 'microsoft/zh-Hans::Settings');
+  });
+
+check('dynamic placeholders and newly added tooltips are translated without overwriting site changes',
+  '<main><p id="intro">Page introduction.</p><input id="search" placeholder="Search repositories"></main>',
+  {}, async page => {
+    await start(page);
+    await page.evaluate(() => {
+      document.getElementById('search').placeholder = 'Search issues';
+      document.getElementById('intro').title = 'Updated help';
+    });
+    await page.waitForFunction(() => document.getElementById('search').placeholder ===
+      'microsoft/zh-Hans::Search issues' && document.getElementById('intro').title ===
+      'microsoft/zh-Hans::Updated help');
+    await page.evaluate(() => window.__TEST.stopTranslation());
+    assert.equal(await page.locator('#search').getAttribute('placeholder'), 'Search issues');
+    assert.equal(await page.locator('#intro').getAttribute('title'), 'Updated help');
+  });
+
+check('attribute results buffered before a site edit never overwrite the newer source',
+  '<main><p>Page introduction.</p><input id="search" placeholder="Old search prompt"></main>',
+  { mock: { latencyMs: 400 } }, async page => {
+    await page.evaluate(() => window.__TEST.startTranslation());
+    await page.waitForFunction(() => window.__calls.length === 1);
+    await page.evaluate(() => { document.getElementById('search').placeholder = 'New search prompt'; });
+    await page.waitForFunction(() => document.getElementById('search').placeholder ===
+      'microsoft/zh-Hans::New search prompt');
+    await page.evaluate(() => window.__TEST.stopTranslation());
+    assert.equal(await page.locator('#search').getAttribute('placeholder'), 'New search prompt');
+  });
+
+check('removed and untranslated attributes keep site edits when restoring',
+  '<main><p>Page introduction.</p><input id="search" placeholder="Search repositories" title="Search help"></main>',
+  {}, async page => {
+    await start(page);
+    await page.evaluate(() => {
+      document.getElementById('search').removeAttribute('placeholder');
+      document.getElementById('search').title = 'Latest site help';
+      window.__TEST.stopTranslation();
+    });
+    assert.equal(await page.locator('#search').getAttribute('placeholder'), null);
+    assert.equal(await page.locator('#search').getAttribute('title'), 'Latest site help');
+  });
+
+check('display and language changes preserve attribute sources and restore correctly',
+  '<main><p>Page introduction.</p><input id="search" placeholder="Search repositories"></main>',
+  {}, async page => {
+    await start(page);
+    const calls = (await inspect(page)).calls.length;
+    await change(page, 'translationOnly', true);
+    await change(page, 'translationOnly', false);
+    assert.equal((await inspect(page)).calls.length, calls);
+    await change(page, 'target', 'ja');
+    await page.waitForFunction(() => document.getElementById('search').placeholder ===
+      'microsoft/ja::Search repositories');
+    assert.ok(!(await inspect(page)).calls.flatMap(call => call.texts).some(text => text.includes('::')));
+    await page.evaluate(() => window.__TEST.stopTranslation());
+    assert.equal(await page.locator('#search').getAttribute('placeholder'), 'Search repositories');
+  });
+
+check('translation-only navigation preserves icons, click handlers and link destinations',
+  '<nav style="display:flex;gap:12px"><a id="docs" href="/docs">Documentation</a>' +
+  '<button id="settings" style="display:flex"><svg id="icon" width="16" height="16"></svg>' +
+  '<span>Settings</span></button><span role="tab">Overview</span></nav>',
+  { settings: { translationOnly: true } }, async page => {
+    const before = await page.locator('nav').innerHTML();
+    await page.evaluate(() => {
+      window.__clicks = 0;
+      document.getElementById('settings').addEventListener('click', () => { window.__clicks++; });
+    });
+    await start(page, 3);
+    assert.equal(await page.locator('#icon').isVisible(), true);
+    assert.equal(await page.locator('#docs').getAttribute('href'), '/docs');
+    assert.equal(await page.locator('#docs > .et-translation').evaluate(el => getComputedStyle(el).display), 'inline');
+    await page.locator('#settings').click();
+    assert.equal(await page.evaluate(() => window.__clicks), 1);
+    await page.evaluate(() => window.__TEST.stopTranslation());
+    assert.equal(await page.locator('nav').innerHTML(), before);
+  });
+
+check('code and icons inside translated blocks stay visible and restore in order',
+  '<main><p id="source">Run <code>npm install</code> before reading this guide.</p>' +
+  '<button>Open <svg width="16" height="16"></svg> menu</button></main>',
+  { settings: { translationOnly: true } }, async page => {
+    const before = await page.locator('main').innerHTML();
+    await start(page, 2);
+    assert.equal(await page.locator('code').isVisible(), true);
+    assert.equal(await page.locator('svg').isVisible(), true);
+    assert.ok(!(await inspect(page)).calls.flatMap(call => call.texts).some(text => text.includes('npm install')));
+    await page.evaluate(() => window.__TEST.stopTranslation());
+    assert.equal(await page.locator('main').innerHTML(), before);
+  });
+
+check('opening a closed details menu translates its content once it is visible',
+  '<main><p>Page introduction.</p><details id="more"><summary>More options</summary>' +
+  '<p id="account">Account preferences</p></details></main>', {}, async page => {
+    await start(page, 2);
+    assert.ok(!(await inspect(page)).calls.flatMap(call => call.texts).includes('Account preferences'));
+    await page.evaluate(() => { document.getElementById('more').open = true; });
+    await page.waitForFunction(() => !!document.querySelector('#account .et-translation'));
+    assert.equal((await inspect(page)).calls.flatMap(call => call.texts).filter(text =>
+      text === 'Account preferences').length, 1);
+  });
+
+check('an attribute-only page translates and restores without adding visible text nodes',
+  '<input id="search" placeholder="Search repositories"><select><option>Public</option></select>',
+  {}, async page => {
+    await page.evaluate(() => window.__TEST.startTranslation());
+    await page.waitForFunction(() => document.getElementById('search').placeholder ===
+      'microsoft/zh-Hans::Search repositories' && document.querySelector('option').label ===
+      'microsoft/zh-Hans::Public');
+    assert.equal((await inspect(page)).translated, 0);
+    assert.equal((await inspect(page)).calls.length, 1);
+    await page.evaluate(() => window.__TEST.stopTranslation());
+    assert.equal(await page.locator('#search').getAttribute('placeholder'), 'Search repositories');
+    assert.equal(await page.locator('option').getAttribute('label'), null);
+  });
+
+check('nested hidden or protected attributes never enter a merged text request',
+  '<main><p>Read <span style="display:none"><span title="SECRET_TOOLTIP">SECRET_TEXT</span></span>' +
+  '<span translate="no" title="SECRET_PROTECTED">PIN</span> this guide.</p>' +
+  '<p>Run <span><code>npm install</code></span> before continuing.</p></main>',
+  { settings: { translationOnly: true } }, async page => {
+    const before = await page.locator('main').innerHTML();
+    await start(page, 2);
+    assert.ok(!(await inspect(page)).calls.flatMap(call => call.texts).some(text =>
+      text.includes('SECRET_') || text.includes('npm install')));
+    assert.equal(await page.locator('code').isVisible(), true);
+    assert.equal(await page.locator('[translate="no"]').isVisible(), true);
+    await page.evaluate(() => window.__TEST.stopTranslation());
+    assert.equal(await page.locator('main').innerHTML(), before);
+  });
+
+check('updating an option caption translates its label while preserving its new implicit value',
+  '<main><p>Page introduction.</p><select><option id="caption">Public</option></select></main>',
+  {}, async page => {
+    await start(page);
+    await page.evaluate(() => { document.getElementById('caption').textContent = 'Private'; });
+    await page.waitForFunction(() => document.getElementById('caption').label === 'microsoft/zh-Hans::Private');
+    assert.equal(await page.locator('#caption').evaluate(el => el.value), 'Private');
+    await page.evaluate(() => window.__TEST.stopTranslation());
+    assert.equal(await page.locator('#caption').getAttribute('label'), null);
+    assert.equal(await page.locator('#caption').textContent(), 'Private');
+  });
+
+check('content added under a CSS-hidden ancestor waits until the ancestor becomes visible',
+  '<main><p>Page introduction.</p><div id="hidden" style="display:none"><span id="later"></span></div></main>',
+  {}, async page => {
+    await start(page);
+    await page.evaluate(() => {
+      document.getElementById('later').textContent = 'New menu item';
+      document.getElementById('later').title = 'New menu tooltip';
+    });
+    await page.waitForTimeout(400);
+    assert.equal((await inspect(page)).calls.length, 1);
+    await page.evaluate(() => { document.getElementById('hidden').style.display = 'block'; });
+    await page.waitForFunction(() => document.getElementById('later').title ===
+      'microsoft/zh-Hans::New menu tooltip' && !!document.querySelector('#hidden .et-translation'));
+  });
+
+check('large-page attribute translation follows the same viewport limit as ordinary text',
+  paragraphs(170) + '<input id="distant" placeholder="Search distant content">', {}, async page => {
+    await start(page);
+    assert.equal((await inspect(page)).mode, 'viewport');
+    assert.ok(!(await inspect(page)).calls.flatMap(call => call.texts).includes('Search distant content'));
+    await page.locator('#distant').scrollIntoViewIfNeeded();
+    await page.waitForFunction(() => document.getElementById('distant').placeholder ===
+      'microsoft/zh-Hans::Search distant content');
+  });
+
+check('stopping before a delayed attribute response preserves the original prompt',
+  '<main><p>Page introduction.</p><input id="search" placeholder="Search repositories"></main>',
+  { mock: { latencyMs: 600 } }, async page => {
+    await page.evaluate(() => window.__TEST.startTranslation());
+    await page.waitForFunction(() => window.__calls.length === 1);
+    await page.evaluate(() => window.__TEST.stopTranslation());
+    await page.waitForTimeout(700);
+    assert.equal(await page.locator('#search').getAttribute('placeholder'), 'Search repositories');
+    assert.equal((await inspect(page)).translated, 0);
+    assert.equal((await inspect(page)).calls[0].aborted, true);
+  });
+
+check('detaching translated controls releases attribute targets and source-run references',
+  '<main><p>Page introduction.</p><nav>Menu heading <button title="Settings">Settings</button>' +
+  '<input placeholder="Search repositories"></nav></main>', {}, async page => {
+    await start(page);
+    await page.evaluate(() => document.querySelector('nav').remove());
+    await page.waitForFunction(() => window.__TEST.session.attributeTargets.size === 0 &&
+      window.__TEST.session.textRuns.size === 0);
+    assert.equal(await page.evaluate(() => Array.from(window.__TEST.session.elements).every(el => el.isConnected)), true);
+  });
+
+check('changing a submit control into a text field during a request preserves user input',
+  '<main><p>Page introduction.</p><input id="control" type="submit" value="Save changes"></main>',
+  { mock: { latencyMs: 500 } }, async page => {
+    await page.evaluate(() => window.__TEST.startTranslation());
+    await page.waitForFunction(() => window.__calls.length === 1);
+    await page.evaluate(() => {
+      const input = document.getElementById('control');
+      input.type = 'text';
+      input.value = 'PRIVATE_USER_INPUT';
+    });
+    await idle(page, 1);
+    assert.equal(await page.locator('#control').inputValue(), 'PRIVATE_USER_INPUT');
+    assert.equal(await page.locator('#control').getAttribute('value'), 'Save changes');
+    assert.ok(!(await inspect(page)).calls.flatMap(call => call.texts).includes('PRIVATE_USER_INPUT'));
+  });
+
+check('new translation opt-outs restore attribute hints and can be removed later',
+  '<main><p>Page introduction.</p><input id="search" placeholder="Search repositories"></main>',
+  {}, async page => {
+    await start(page);
+    await page.evaluate(() => document.getElementById('search').setAttribute('translate', 'no'));
+    await page.waitForFunction(() => document.getElementById('search').placeholder === 'Search repositories');
+    const calls = (await inspect(page)).calls.length;
+    await page.evaluate(() => {
+      document.getElementById('search').placeholder = 'Search issues';
+      document.getElementById('search').removeAttribute('translate');
+    });
+    await page.waitForFunction(() => document.getElementById('search').placeholder ===
+      'microsoft/zh-Hans::Search issues');
+    assert.equal((await inspect(page)).calls.length, calls + 1);
+  });
+
 check('120 offscreen paragraphs are sent in one Microsoft request and shown together',
   paragraphs(120), {}, async page => {
     await start(page, 120);
