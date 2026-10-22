@@ -5,6 +5,7 @@
 // @description  PageLingo：用微软 / DeepL / Google / MyMemory 翻译网页，支持双语对照、仅译文、划词翻译和快捷键
 // @author       qinmuran0316
 // @license      MIT
+// @homepage     https://github.com/qinmuran0316/PageLingo
 // @homepageURL  https://github.com/qinmuran0316/PageLingo
 // @supportURL   https://github.com/qinmuran0316/PageLingo/issues
 // @updateURL    https://raw.githubusercontent.com/qinmuran0316/PageLingo/main/edge-translator.user.js
