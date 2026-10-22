@@ -1452,6 +1452,30 @@
 
   const PROTECTED_INLINE_TAGS = new Set(['CODE', 'KBD', 'SAMP']);
   const PROTECTED_TOKEN_RE = /\[\[\s*PGL[_ -]?CODE[_ -]?(\d+)\s*\]\]/gi;
+  const GITHUB_FILENAME_ALIASES = {
+    'zh-CN': {
+      readme: '说明文档',
+      plan: '计划',
+      review: '审查',
+      license: '许可证',
+      changelog: '更新日志',
+      contributing: '贡献指南',
+      security: '安全说明',
+      todo: '待办事项',
+      install: '安装说明',
+    },
+    'zh-TW': {
+      readme: '說明文件',
+      plan: '計畫',
+      review: '審查',
+      license: '授權條款',
+      changelog: '更新日誌',
+      contributing: '貢獻指南',
+      security: '安全說明',
+      todo: '待辦事項',
+      install: '安裝說明',
+    },
+  };
 
   function textContext() {
     return { styles: new WeakMap(), protectedNodes: [] };
@@ -1530,6 +1554,39 @@
     const payload = getSourcePayload(el);
     const protectedText = payload.protectedNodes.map(node => node.textContent || '').join('\u0001');
     return payload.text + '\u0001' + protectedText;
+  }
+
+  function githubFilenameInfo(target) {
+    const el = target instanceof AttributeTextTarget ? target.element : target;
+    if (!el || !el.matches || !el.matches('a.Link--primary[title]')) return null;
+    const href = el.getAttribute('href') || '';
+    const hrefPath = href.split(/[?#]/, 1)[0];
+    const hrefPart = hrefPath.split('/').filter(Boolean).pop() || '';
+    let hrefName = hrefPart;
+    try { hrefName = decodeURIComponent(hrefPart); } catch (_) {}
+    // GitHub may translate title/aria-label before the visible filename is
+    // rendered. The repository path remains stable, so use it as the source
+    // of truth and only fall back to the attribute for unusual markup.
+    const name = hrefName || el.getAttribute('title') || '';
+    const aria = el.getAttribute('aria-label') || '';
+    if (!name || !/\b(File|Directory)\)\s*$/.test(aria)) return null;
+    if (!href || !/(?:\/blob\/|\/tree\/)/.test(href)) return null;
+    const row = el.closest('tr');
+    if (!row || !row.querySelector('.react-directory-filename-cell,.react-directory-filename-column')) return null;
+    const match = /^(.+?)(\.[A-Za-z0-9][A-Za-z0-9._-]*)$/.exec(name);
+    return {
+      name,
+      base: (match ? match[1] : name).toLowerCase(),
+      extension: match ? match[2] : '',
+    };
+  }
+
+  function applyFilenameFallback(target, text) {
+    const info = githubFilenameInfo(target);
+    const aliases = GITHUB_FILENAME_ALIASES[settings.targetLang];
+    if (!info || !aliases || !aliases[info.base]) return text;
+    const replacement = aliases[info.base] + info.extension;
+    return String(text || '').split(info.name).join(replacement);
   }
 
   function isWorthTranslating(text, el) {
@@ -2295,7 +2352,9 @@
   }
 
   function writeElementTranslation(el, state) {
-    const values = state.results.filter((value) => typeof value === 'string' && value.trim());
+    const values = state.results
+      .filter((value) => typeof value === 'string' && value.trim())
+      .map(value => applyFilenameFallback(el, value));
     if (!values.length) return;
     if (el instanceof AttributeTextTarget) {
       if (state.status === 'done' && attributeSupported(el.element, el.attribute) &&
@@ -2327,7 +2386,9 @@
         const state = elementStates.get(el);
         const node = state && state.translationEl;
         if (!el.isConnected || !node || !node.isConnected) continue;
-        const values = state.results.filter(value => typeof value === 'string' && value.trim());
+        const values = state.results
+          .filter(value => typeof value === 'string' && value.trim())
+          .map(value => applyFilenameFallback(el, value));
         if (values.length) writeProtectedTranslation(node, values.join(' '), state);
         if (settings.translationOnly) node.__etSourceWrapper = wrapSourceContent(el);
         else if (node.__etSourceWrapper) {

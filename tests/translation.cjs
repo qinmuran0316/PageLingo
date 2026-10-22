@@ -269,6 +269,26 @@ check('markdown headings, file names, punctuation and inline code keep their ful
     assert.equal(await page.locator('article').innerHTML(), before);
   });
 
+check('GitHub file rows translate documentation names without changing links',
+  '<table><tbody><tr><td class="react-directory-row-name-cell-large-screen">' +
+  '<div class="react-directory-filename-column"><svg aria-hidden="true"></svg>' +
+  '<div class="overflow-hidden"><div class="react-directory-filename-cell">' +
+  '<div class="react-directory-truncate"><a title="README.md" aria-label="README.md, (File)" ' +
+  'class="Link--primary" href="/qinmuran0316/PageLingo/blob/main/README.md">README.md</a>' +
+  '</div></div></div></div></td></tr></tbody></table>',
+  { settings: { translationOnly: true } }, async page => {
+    const before = await page.locator('table').innerHTML();
+    await start(page, 1);
+    assert.equal(await page.locator('.et-translation').textContent(), 'microsoft/zh-Hans::说明文档.md');
+    assert.equal(await page.locator('a.Link--primary').getAttribute('title'), 'microsoft/zh-Hans::说明文档.md');
+    assert.equal(await page.locator('a.Link--primary').getAttribute('aria-label'),
+      'microsoft/zh-Hans::说明文档.md, (File)');
+    assert.equal(await page.locator('a.Link--primary').getAttribute('href'),
+      '/qinmuran0316/PageLingo/blob/main/README.md');
+    await page.evaluate(() => window.__TEST.stopTranslation());
+    assert.equal(await page.locator('table').innerHTML(), before);
+  });
+
 check('updating an option caption translates its label while preserving its new implicit value',
   '<main><p>Page introduction.</p><select><option id="caption">Public</option></select></main>',
   {}, async page => {
