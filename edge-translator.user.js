@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PageLingo — 双语网页翻译
 // @namespace    https://github.com/qinmuran0316/PageLingo
-// @version      0.8.0
+// @version      0.9.0
 // @description  PageLingo：将英文、日文、韩文等网页内容快速翻译成中文，支持中英日韩多种语言和划词翻译
 // @author       qinmuran0316
 // @license      MIT
@@ -34,7 +34,7 @@
   if (window.__EDGE_TRANSLATOR_LOADED__) return;
   window.__EDGE_TRANSLATOR_LOADED__ = true;
 
-  const VERSION = '0.8.0';
+  const VERSION = '0.9.0';
   const HOST_ID = 'et-translator-host';
   const STYLE_ID = 'et-page-style';
   const SETTINGS_KEY = 'et:settings:v1';
@@ -216,7 +216,9 @@
       .replace(/\u00a0/g, ' ')
       .replace(/[ \t\f\v]+/g, ' ')
       .replace(/\s*\n\s*/g, ' ')
-      .replace(/\s+([,.;:!?，。；：！？])/g, '$1')
+      .replace(/\s+([,.;:!?，。；：！？、…·])/g, '$1')
+      .replace(/([（【「『“‘])\s+/g, '$1')
+      .replace(/\s+([）】」』”’])/g, '$1')
       .trim();
   }
 
@@ -1365,14 +1367,14 @@
         ) {
           continue;
         }
-        // Preserve icons, code, form controls and explicitly untranslated parts.
-        // They are absent from the source sent to the service, so hiding them
-        // would remove information that no translation can replace.
-        if (child.nodeType === 1 && (child.matches(TEXT_SKIP_SELECTOR) || child.matches('img,picture'))) {
+        // Preserve media, controls and explicitly untranslated parts. Inline
+        // code is protected with a token and restored inside the translation,
+        // so it can be hidden here without losing its position in the sentence.
+        if (child.nodeType === 1 && child.matches(SOURCE_PRESERVE_SELECTOR)) {
           wrapper = null;
           continue;
         }
-        if (child.nodeType === 1 && child.querySelector(TEXT_SKIP_SELECTOR + ',img,picture')) {
+        if (child.nodeType === 1 && child.querySelector(SOURCE_PRESERVE_SELECTOR)) {
           wrapper = null;
           wrappers.push(...wrapSourceContent(child));
           continue;
@@ -1437,8 +1439,22 @@
     'video', 'textarea', 'input', 'select', 'option',
   ].join(',');
 
+  // These nodes remain visible in translation-only mode because they carry
+  // interaction, media, or explicit no-translate semantics. Inline code is
+  // deliberately absent: it is restored from protected tokens in the result.
+  const SOURCE_PRESERVE_SELECTOR = [
+    '.et-translation', 'script', 'style', 'noscript', 'template', 'pre',
+    '[hidden]', '[inert]', '[aria-hidden="true"]',
+    '[translate="no"]', '.notranslate', 'img', 'picture', 'svg', 'math',
+    'canvas', 'iframe', 'object', 'embed', 'audio', 'video', 'textarea',
+    'input', 'select', 'option',
+  ].join(',');
+
+  const PROTECTED_INLINE_TAGS = new Set(['CODE', 'KBD', 'SAMP']);
+  const PROTECTED_TOKEN_RE = /\[\[\s*PGL[_ -]?CODE[_ -]?(\d+)\s*\]\]/gi;
+
   function textContext() {
-    return { styles: new WeakMap() };
+    return { styles: new WeakMap(), protectedNodes: [] };
   }
 
   function readStyle(el, context) {
@@ -1471,6 +1487,11 @@
     if (node.nodeType === 3) return node.nodeValue || '';
     if (node.nodeType !== 1) return '';
     const originalWrapper = session.sourceWrappers.has(node);
+    if (PROTECTED_INLINE_TAGS.has(node.tagName) && !node.closest('pre')) {
+      const index = context.protectedNodes.length;
+      context.protectedNodes.push(node);
+      return ` [[PGL_CODE_${index}]] `;
+    }
     if (!originalWrapper && node.matches(TEXT_SKIP_SELECTOR)) return '';
     const style = readStyle(node, context);
     if (!originalWrapper && hiddenStyle(style)) return '';
@@ -1496,12 +1517,27 @@
     return normalizeText(extractNodeText(el, context));
   }
 
+  function getSourcePayload(el) {
+    if (el instanceof AttributeTextTarget) return { text: normalizeText(el.read()), protectedNodes: [] };
+    const context = textContext();
+    return {
+      text: normalizeText(extractNodeText(el, context)),
+      protectedNodes: context.protectedNodes.slice(),
+    };
+  }
+
+  function getSourceFingerprint(el) {
+    const payload = getSourcePayload(el);
+    const protectedText = payload.protectedNodes.map(node => node.textContent || '').join('\u0001');
+    return payload.text + '\u0001' + protectedText;
+  }
+
   function isWorthTranslating(text, el) {
     const value = normalizeText(text);
     // Keep short labels and one-letter words such as “I”, “A”, or “X” in the
     // queue. Interactive page chrome often consists of very short labels, and
     // dropping them makes a page look only partially translated.
-    if (value.length < 1 || !/[\p{L}]/u.test(value)) return false;
+    if (value.length < 1 || !/[\p{L}\p{N}]/u.test(value)) return false;
     // A Chinese document may contain untranslated English/Japanese/Korean UI.
     // Language metadata alone must never discard those foreign-script words.
     const langNode = el && el.closest('[lang]');
@@ -1913,8 +1949,8 @@
         return;
       }
       if (state.status === 'paused' || state.status === 'queued' || state.status === 'active') return;
-      const text = getSourceText(el);
-      if (text === state.text && ((el instanceof AttributeTextTarget && el.translation !== null) ||
+      const fingerprint = getSourceFingerprint(el);
+      if (fingerprint === state.fingerprint && ((el instanceof AttributeTextTarget && el.translation !== null) ||
         (state.translationEl && state.translationEl.isConnected) ||
         session.renderQueue.get(el) === state)) return;
       if (!bumpChangeGuard(el)) {
@@ -2132,7 +2168,7 @@
       for (const [el, state] of session.renderQueue) {
         session.renderQueue.delete(el);
         if (!el.isConnected || elementStates.get(el) !== state || state.generation !== generation) continue;
-        if (getSourceText(el) !== state.text) {
+        if (getSourceFingerprint(el) !== state.fingerprint) {
           scheduleRecheck(el);
           continue;
         }
@@ -2181,10 +2217,6 @@
     node.dataset.mode = settings.translationOnly ? 'only' : 'bilingual';
     node.__etOwner = el;
 
-    if (settings.translationOnly) {
-      node.__etSourceWrapper = wrapSourceContent(el);
-    }
-
     const layout = state.layout || readElementLayout(el);
     node.dataset.inline = String(layout.inline);
     const parent = el.parentElement;
@@ -2218,6 +2250,50 @@
     scheduleRenderCommit();
   }
 
+  function writeProtectedTranslation(node, text, state) {
+    const fragment = document.createDocumentFragment();
+    let cursor = 0;
+    let matched = 0;
+    PROTECTED_TOKEN_RE.lastIndex = 0;
+    let match;
+    while ((match = PROTECTED_TOKEN_RE.exec(text))) {
+      if (match.index > cursor) fragment.appendChild(document.createTextNode(text.slice(cursor, match.index)));
+      const index = Number(match[1]);
+      const source = state.protectedNodes && state.protectedNodes[index];
+      if (source) {
+        fragment.appendChild(settings.translationOnly
+          ? source.cloneNode(true)
+          : document.createTextNode(source.textContent || ''));
+        matched += 1;
+      } else {
+        fragment.appendChild(document.createTextNode(match[0]));
+      }
+      cursor = match.index + match[0].length;
+    }
+    if (cursor < text.length) fragment.appendChild(document.createTextNode(text.slice(cursor)));
+
+    // If a provider drops the protection token, keep the code recoverable
+    // instead of silently removing it from translation-only output.
+    if (state.protectedNodes && state.protectedNodes.length && matched === 0) {
+      for (const source of state.protectedNodes) {
+        fragment.appendChild(settings.translationOnly
+          ? source.cloneNode(true)
+          : document.createTextNode(source.textContent || ''));
+      }
+    }
+    node.replaceChildren(fragment);
+  }
+
+  function sourceTextForDisplay(state) {
+    const text = state.text || '';
+    if (!state.protectedNodes || !state.protectedNodes.length) return text;
+    PROTECTED_TOKEN_RE.lastIndex = 0;
+    return text.replace(PROTECTED_TOKEN_RE, (token, rawIndex) => {
+      const source = state.protectedNodes[Number(rawIndex)];
+      return source ? normalizeText(source.textContent || '') : token;
+    });
+  }
+
   function writeElementTranslation(el, state) {
     const values = state.results.filter((value) => typeof value === 'string' && value.trim());
     if (!values.length) return;
@@ -2230,14 +2306,17 @@
       ? state.translationEl
       : (ensureTranslationNode(el, state), state.translationEl);
     if (!node) return;
-    node.textContent = values.join(' ');
+    writeProtectedTranslation(node, values.join(' '), state);
     node.dataset.state = state.status === 'failed' ? 'error' : state.pending > 0 ? 'loading' : 'done';
+    if (settings.translationOnly && !node.__etSourceWrapper) {
+      node.__etSourceWrapper = wrapSourceContent(el);
+    }
     updateTranslationTitle(node, state);
   }
 
   function updateTranslationTitle(node, state) {
     const providers = Array.from(new Set(state.providers.filter(Boolean)));
-    node.title = settings.showOriginal ? state.text
+    node.title = settings.showOriginal ? sourceTextForDisplay(state)
       : '机器翻译' + (providers.length ? ' · ' + providers.map(providerLabel).join(' / ') : '');
     if (providers.length) node.dataset.provider = providers.join(',');
   }
@@ -2248,6 +2327,8 @@
         const state = elementStates.get(el);
         const node = state && state.translationEl;
         if (!el.isConnected || !node || !node.isConnected) continue;
+        const values = state.results.filter(value => typeof value === 'string' && value.trim());
+        if (values.length) writeProtectedTranslation(node, values.join(' '), state);
         if (settings.translationOnly) node.__etSourceWrapper = wrapSourceContent(el);
         else if (node.__etSourceWrapper) {
           unwrapSourceWrapper(node.__etSourceWrapper);
@@ -2279,7 +2360,8 @@
       return;
     }
 
-    const text = getSourceText(el);
+    const payload = getSourcePayload(el);
+    const text = payload.text;
     if (!isWorthTranslating(text, el)) return;
     const chunks = splitText(text, MAX_BLOCK_CHARS);
     if (!chunks.length) return;
@@ -2288,11 +2370,13 @@
 
     const state = {
       text,
+      fingerprint: getSourceFingerprint(el),
       chunks,
       results: new Array(chunks.length),
       providers: new Array(chunks.length),
       targetLang: settings.targetLang,
       scope: cacheScope(),
+      protectedNodes: payload.protectedNodes.map(node => node.cloneNode(true)),
       layout: null,
       failedParts: new Set(),
       status: 'queued',
@@ -2355,8 +2439,8 @@
     if (!state || state !== job.state || state.generation !== job.generation) return;
     if (state.results[job.partIndex] !== undefined) return;
 
-    const currentText = snapshot === undefined ? getSourceText(job.el) : snapshot;
-    if (currentText !== state.text) {
+    const currentFingerprint = snapshot === undefined ? getSourceFingerprint(job.el) : snapshot;
+    if (currentFingerprint !== state.fingerprint) {
       removeTranslationNode(state.translationEl);
       session.renderQueue.delete(job.el);
       elementStates.delete(job.el);
@@ -2481,7 +2565,7 @@
     for (const job of batch.jobs) {
       const state = elementStates.get(job.el);
       if (state !== job.state || !job.el.isConnected || snapshots.has(job.el)) continue;
-      snapshots.set(job.el, getSourceText(job.el));
+      snapshots.set(job.el, getSourceFingerprint(job.el));
     }
     let cooling = false;
     withMutationPaused(() => {

@@ -203,7 +203,7 @@ check('code and icons inside translated blocks stay visible and restore in order
   { settings: { translationOnly: true } }, async page => {
     const before = await page.locator('main').innerHTML();
     await start(page, 2);
-    assert.equal(await page.locator('code').isVisible(), true);
+    assert.equal(await page.locator('.et-translation code').isVisible(), true);
     assert.equal(await page.locator('svg').isVisible(), true);
     assert.ok(!(await inspect(page)).calls.flatMap(call => call.texts).some(text => text.includes('npm install')));
     await page.evaluate(() => window.__TEST.stopTranslation());
@@ -244,10 +244,29 @@ check('nested hidden or protected attributes never enter a merged text request',
     await start(page, 2);
     assert.ok(!(await inspect(page)).calls.flatMap(call => call.texts).some(text =>
       text.includes('SECRET_') || text.includes('npm install')));
-    assert.equal(await page.locator('code').isVisible(), true);
+    assert.equal(await page.locator('.et-translation code').isVisible(), true);
     assert.equal(await page.locator('[translate="no"]').isVisible(), true);
     await page.evaluate(() => window.__TEST.stopTranslation());
     assert.equal(await page.locator('main').innerHTML(), before);
+  });
+
+check('markdown headings, file names, punctuation and inline code keep their full context',
+  '<article class="markdown-body"><h1>README.md</h1>' +
+  '<p>Run <code>npm ci</code>; then read <code>package-lock.json</code>.</p>' +
+  '<p>Version v0.8.0, C++ and 404: ready?</p></article>',
+  { settings: { translationOnly: true } }, async page => {
+    const before = await page.locator('article').innerHTML();
+    await start(page, 3);
+    const result = await inspect(page);
+    const sent = result.calls.flatMap(call => call.texts);
+    assert.ok(sent.some(text => text.includes('README.md')));
+    assert.ok(sent.some(text => text.includes('Run [[PGL_CODE_0]]; then read [[PGL_CODE_1]].')));
+    assert.ok(sent.some(text => text.includes('Version v0.8.0, C++ and 404: ready?')));
+    assert.ok(!sent.some(text => text.includes('npm ci') || text.includes('package-lock.json')));
+    assert.equal(await page.locator('.et-translation code').count(), 2);
+    assert.deepEqual(await page.locator('.et-translation code').allTextContents(), ['npm ci', 'package-lock.json']);
+    await page.evaluate(() => window.__TEST.stopTranslation());
+    assert.equal(await page.locator('article').innerHTML(), before);
   });
 
 check('updating an option caption translates its label while preserving its new implicit value',

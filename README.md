@@ -2,7 +2,7 @@
 
 **让网页以两种语言展开。 / Read the web in two languages.**
 
-`v0.8.0` · 单文件用户脚本 · Tampermonkey / ScriptCat
+`v0.9.0` · 单文件用户脚本 · Tampermonkey / ScriptCat
 
 [简体中文](#简体中文) · [English](#english)
 
@@ -14,7 +14,13 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 
 点击页面边缘的「译」按钮，即可翻译网页，默认只显示中文译文；取消「仅显示译文」可恢复双语对照，再次点击按钮恢复原文。
 
-当前版本：`0.8.0`。直接查看安装文件：[edge-translator.user.js](edge-translator.user.js)。
+当前版本：`0.9.0`。直接查看安装文件：[edge-translator.user.js](edge-translator.user.js)。
+
+### v0.9.0：补齐 Markdown、README 和行内代码
+
+- Markdown 正文、README 文件名、版本号和带标点的句子进入统一批量翻译。
+- 行内 `<code>`、`<kbd>` 和 `<samp>` 使用保护占位符，翻译上下文完整，命令、路径和版本号在译文中按原样恢复。
+- 翻译只在整批结果准备好后显示，代码、链接、图标和表单仍保持可用；停止翻译会完整还原页面。
 
 > 从 v0.1 升级：v0.2 的脚本名称和 `@namespace` 已改为 PageLingo。安装前请先在 Tampermonkey / ScriptCat 中禁用或删除旧的「双语网页翻译（Edge）」脚本，避免管理器里保留两份。v0.2 已加入 `@updateURL`，之后可在脚本管理器中检查更新。
 
@@ -45,7 +51,7 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 - **对比实测**：与 v0.6.0 各交替运行 3 次，在每次 600ms 的模拟网络下，Google 24 段从 24 次请求、约 9.85 秒降为 1 次、约 0.62 秒。真实 Google POST 120 段已返回 HTTP 200 和完整译文，单次约 3.9 秒。模拟数字不代表真实网络速度。
 - **保留已有优化**：两个批次并发、划词优先、取消与重试、免费 Key 保护、接口隔离缓存和动态内容清理继续生效。
 
-升级后确认版本为 **0.8.0**，刷新网页。右键“译”可调整设置；需要自动择快时，将接口设为「自动择快（推荐）」并开启「接口失败时自动回退」。已有设置不会被升级覆盖。
+升级后确认版本为 **0.9.0**，刷新网页。右键“译”可调整设置；需要自动择快时，将接口设为「自动择快（推荐）」并开启「接口失败时自动回退」。已有设置不会被升级覆盖。
 
 ### v0.3.0 新增：仅译文模式
 
@@ -190,11 +196,12 @@ Key 只保存在脚本管理器本地存储中，只会发送给 DeepL 官方端
 - **真实微软大批次冒烟**：120 条公开测试句，单次请求返回 HTTP 200，译文数量与非空字段均正确；本次约 3.2 秒。真实接口耗时不能与固定延迟模拟结果等同。
 - **v0.7.0 回归**：仓库内保留 57 个浏览器测试，增加 Google 真批量、响应数量和空值校验、自动择快及取消、缓存跨刷新复用/到期/关闭/清除、零请求显示切换和单击操作等断言。
 - **v0.8.0 覆盖与速度（2026-10-23）**：79 项浏览器回归通过。针对 GitHub 风格界面构建的 20 项文字模拟夹具中，v0.7.2 提取 5 项，v0.8.0 提取全部 20 项，两版均为一次批量请求；该结果不代表所有网站的覆盖率。与 v0.7.2 交替运行 3 轮，120 段正文在 600ms 模拟响应下的完整显示中位耗时均约 635ms。另以 8 个公开界面词测试真实微软端点，HTTP 200、返回完整译文，约 0.85 秒；真实速度随网络变化。
+- **v0.9.0 Markdown 完整度与回归（2026-10-23）**：80 项浏览器回归全部通过，新增 README/Markdown 标题、文件名、版本号、标点句子和行内代码保护测试。基准中 Google 批量 24 段保持 1 次请求、约 620ms；自动择快 120 段约 645ms；微软批量 120 段约 643ms；刷新命中缓存约 13ms。模拟数据用于比较调度策略，真实速度随网络变化。
 - 尚未在真实 Tampermonkey / ScriptCat 扩展中完成安装、权限和升级验收，也尚未用真实 DeepL Key 调用；这是发布前剩余的人工测试。
 
 ### 实现说明
 
-为了安装和分发简单，v0.8.0 使用单个 `.user.js` 文件，不依赖构建工具。文件内按“设置 / 请求 / 接口适配 / 提取 / 调度 / 渲染 / 界面”分段组织。
+为了安装和分发简单，v0.9.0 使用单个 `.user.js` 文件，不依赖构建工具。文件内按“设置 / 请求 / 接口适配 / 提取 / 调度 / 渲染 / 界面”分段组织。
 
 开发验证使用 Node.js 和 Playwright，不影响用户安装。运行 `npm ci`、`npm run check`、`npm test`；速度对比运行 `npm run bench`。测试会优先使用本机 Edge，也可通过 `PAGELINGO_BROWSER_PATH` 指定浏览器；没有 Edge 时先执行 `npx playwright install chromium`。自动化使用模拟接口，基准报告写入 `tests/results/benchmark.json`；详见 [tests/README.md](tests/README.md)。
 
@@ -213,7 +220,13 @@ PageLingo (Bilingual Web Page Translation) is a single-file userscript for Micro
 
 Click the **译** button at the edge of a page to translate it into Chinese. Translation-only mode is enabled by default; disable it for bilingual reading, or click the button again to restore the original page.
 
-Current version: `0.8.0`. View the userscript file: [edge-translator.user.js](edge-translator.user.js).
+Current version: `0.9.0`. View the userscript file: [edge-translator.user.js](edge-translator.user.js).
+
+### New in 0.9.0: complete Markdown and inline-code coverage
+
+- Markdown paragraphs, README file names, versions, and punctuation-rich sentences are collected into the same batch.
+- Inline `<code>`, `<kbd>`, and `<samp>` content is protected with placeholders, so surrounding sentences translate without rewriting commands, paths, or versions.
+- The complete page still appears as one committed batch while links, icons, and controls remain usable.
 
 > Upgrading from v0.1: v0.2 changes both the script name and `@namespace` to PageLingo. Disable or remove the old **双语网页翻译（Edge）** script in Tampermonkey / ScriptCat before installing v0.2 so the manager does not keep two copies. v0.2 includes `@updateURL`, so later versions can be checked from the userscript manager.
 
@@ -388,11 +401,12 @@ Checks performed locally on 2026-10-22:
 - **Whole-page speed (v0.6)**: 120 short paragraphs, 600ms simulated requests, three alternating runs: median complete display fell from 1,473ms on v0.5.0 to about 640ms. The old display counts were 32/64/96/120; the new version displayed all 120 together with one request.
 - **Microsoft production smoke test**: one 120-item request returned HTTP 200 and 120 non-empty translations in about 3.2 seconds. This real endpoint measurement is separate from the fixed-latency simulation.
 - **v0.7.0 regression checks**: 57 browser tests include Google batches and response validation, automatic routing and cancellation, cache across reloads/expiration/disabling/clearing, request-free display switches, and single-click controls.
+- **v0.9.0 Markdown coverage and regression**: all 80 browser tests pass, including README/Markdown headings, file names, versions, punctuation-rich sentences, and inline-code protection. The benchmark keeps Google's 24-item batch at one request and about 620ms, automatic routing for 120 paragraphs at about 645ms, Microsoft batching at about 643ms, and reload cache hits at about 13ms under simulated conditions.
 - Installation, permission, and upgrade acceptance in real Tampermonkey / ScriptCat extensions is still pending, and DeepL has not been tested with a real key. These remain the required manual tests before release.
 
 ### Implementation notes
 
-To keep installation and distribution simple, v0.8.0 is a single `.user.js` file with no build step. The file is organized into settings, requests, provider adapters, extraction, scheduling, rendering, and UI sections.
+To keep installation and distribution simple, v0.9.0 is a single `.user.js` file with no build step. The file is organized into settings, requests, provider adapters, extraction, scheduling, rendering, and UI sections.
 
 Development checks use Node.js and Playwright: `npm ci`, `npm run check`, `npm test`, and `npm run bench`. Tests prefer a local Edge installation or `PAGELINGO_BROWSER_PATH`. Without Edge, first run `npx playwright install chromium`. Requests are mocked; benchmark results are written to `tests/results/benchmark.json`. See [tests/README.md](tests/README.md).
 
