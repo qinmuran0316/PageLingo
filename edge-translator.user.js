@@ -2,7 +2,7 @@
 // @name         PageLingo — 双语网页翻译
 // @namespace    https://github.com/qinmuran0316/PageLingo
 // @version      0.7.1
-// @description  PageLingo：用微软 / DeepL / Google / MyMemory 翻译网页，支持双语对照、仅译文、划词翻译和快捷键
+// @description  PageLingo：将英文、日文、韩文等网页内容快速翻译成中文，支持中英日韩多种语言和划词翻译
 // @author       qinmuran0316
 // @license      MIT
 // @homepage     https://github.com/qinmuran0316/PageLingo
