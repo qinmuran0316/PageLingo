@@ -73,6 +73,17 @@ check('Chinese page metadata does not suppress foreign or mixed-language text',
       ['Settings', '高级 Advanced settings', 'アカウント設定', '계정 설정']);
   });
 
+check('site exclusion selectors keep custom regions untouched',
+  '<main><p>Translate this article.</p><section class="comments"><p>Do not translate these comments.</p></section></main>',
+  {}, async page => {
+    await change(page, 'siteExclude', '.comments');
+    await start(page, 1);
+    assert.equal(await page.locator('.comments .et-translation').count(), 0);
+    assert.ok(!(await inspect(page)).calls.flatMap(call => call.texts)
+      .some(text => text.includes('Do not translate these comments.')));
+    assert.equal(await page.locator('.comments').innerText(), 'Do not translate these comments.');
+  });
+
 check('English page metadata does not suppress French content when targeting English',
   '<main lang="en"><p>Bonjour tout le monde.</p></main>',
   { settings: { targetLang: 'en' } }, async page => {
@@ -87,6 +98,7 @@ check('tooltips, placeholders, accessible labels and option captions share one t
   '<input id="submit" type="submit" value="Save changes">' +
   '<textarea id="comment" placeholder="Write a comment">PRIVATE_COMMENT</textarea>' +
   '<img id="photo" alt="Profile picture">' +
+  '<input id="image-submit" type="image" alt="Submit form">' +
   '<a id="help" href="/help" title="Read documentation">Help</a>' +
   '<button id="menu" aria-label="Open menu"><svg width="16" height="16"></svg></button>' +
   '<select id="visibility"><option value="public">Public</option><option>Private</option></select>' +
@@ -100,7 +112,8 @@ check('tooltips, placeholders, accessible labels and option captions share one t
     for (const [selector, name, text] of [
       ['#search', 'placeholder', 'Search repositories'], ['#search', 'aria-label', 'Site search'],
       ['#submit', 'value', 'Save changes'], ['#comment', 'placeholder', 'Write a comment'],
-      ['#photo', 'alt', 'Profile picture'], ['#help', 'title', 'Read documentation'],
+      ['#photo', 'alt', 'Profile picture'], ['#image-submit', 'alt', 'Submit form'],
+      ['#help', 'title', 'Read documentation'],
       ['#menu', 'aria-label', 'Open menu'],
     ]) assert.equal(await page.locator(selector).getAttribute(name), `microsoft/zh-Hans::${text}`);
     assert.equal(await page.locator('#search').inputValue(), 'PRIVATE_INPUT');

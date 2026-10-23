@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PageLingo — 双语网页翻译
 // @namespace    https://github.com/qinmuran0316/PageLingo
-// @version      0.9.1
+// @version      0.10.0
 // @description  PageLingo：将英文、日文、韩文等网页内容快速翻译成中文，支持中英日韩多种语言和划词翻译
 // @author       qinmuran0316
 // @license      MIT
@@ -34,7 +34,7 @@
   if (window.__EDGE_TRANSLATOR_LOADED__) return;
   window.__EDGE_TRANSLATOR_LOADED__ = true;
 
-  const VERSION = '0.9.1';
+  const VERSION = '0.10.0';
   const HOST_ID = 'et-translator-host';
   const STYLE_ID = 'et-page-style';
   const SETTINGS_KEY = 'et:settings:v1';
@@ -92,6 +92,7 @@
     '[data-testid="code-viewer"]',
     '[data-testid="diff-table"]',
   ].join(',');
+  let siteExcludeCache = { host: '', raw: '', selector: '', invalid: [] };
   const SKIP_CLOSEST_SELECTOR = [
     'pre',
     'code',
@@ -594,8 +595,9 @@
   function getSiteSettings() {
     const host = location.host || location.hostname || 'local';
     if (!settings.sites[host] || typeof settings.sites[host] !== 'object') {
-      settings.sites[host] = { auto: false, disabled: false };
+      settings.sites[host] = { auto: false, disabled: false, exclude: '' };
     }
+    if (typeof settings.sites[host].exclude !== 'string') settings.sites[host].exclude = '';
     return settings.sites[host];
   }
 
@@ -604,6 +606,43 @@
     Object.assign(site, patch);
     saveSettings();
     return site;
+  }
+
+  function siteExcludeParts() {
+    const host = location.host || location.hostname || 'local';
+    const raw = String(getSiteSettings().exclude || '');
+    if (siteExcludeCache.host === host && siteExcludeCache.raw === raw) return siteExcludeCache;
+    const valid = [];
+    const invalid = [];
+    const seen = new Set();
+    for (const line of raw.split(/\r?\n/).map(value => value.trim()).filter(Boolean)) {
+      if (seen.has(line)) continue;
+      seen.add(line);
+      try {
+        document.createDocumentFragment().querySelector(line);
+        valid.push(line);
+      } catch (_) {
+        invalid.push(line);
+      }
+    }
+    siteExcludeCache = { host, raw, selector: valid.join(','), invalid };
+    return siteExcludeCache;
+  }
+
+  function isSiteExcluded(el) {
+    if (!el || el.nodeType !== 1) return false;
+    const selector = siteExcludeParts().selector;
+    if (!selector) return false;
+    try { return el.matches(selector) || !!el.closest(selector); }
+    catch (_) { return false; }
+  }
+
+  function hasExcludedDescendant(el) {
+    if (!el || el.nodeType !== 1) return false;
+    const selector = siteExcludeParts().selector;
+    if (!selector) return false;
+    try { return !!el.querySelector(selector); }
+    catch (_) { return false; }
   }
 
   // ---------------------------------------------------------------------------
@@ -1257,13 +1296,13 @@
     if (name === 'value') return el.matches('input') && ['button', 'submit', 'reset'].includes(el.type);
     if (name === 'placeholder') return el.matches('input,textarea');
     if (name === 'label') return el.matches('option,optgroup');
-    if (name === 'alt') return el.matches('img,area');
+    if (name === 'alt') return el.matches('img,area,input[type="image"]');
     return name === 'title' || name === 'aria-label';
   }
 
   function attributeProtected(el) {
     return !!el.closest('pre,code,kbd,samp,[contenteditable],[translate="no"],.notranslate,[inert]') ||
-      !!el.closest(SITE_SKIP_SELECTOR);
+      !!el.closest(SITE_SKIP_SELECTOR) || isSiteExcluded(el);
   }
 
   // Attribute targets share batching, deduplication, caching, cancellation and
@@ -1374,11 +1413,11 @@
         // Preserve media, controls and explicitly untranslated parts. Inline
         // code is protected with a token and restored inside the translation,
         // so it can be hidden here without losing its position in the sentence.
-        if (child.nodeType === 1 && child.matches(SOURCE_PRESERVE_SELECTOR)) {
+        if (child.nodeType === 1 && (child.matches(SOURCE_PRESERVE_SELECTOR) || isSiteExcluded(child))) {
           wrapper = null;
           continue;
         }
-        if (child.nodeType === 1 && child.querySelector(SOURCE_PRESERVE_SELECTOR)) {
+        if (child.nodeType === 1 && (child.querySelector(SOURCE_PRESERVE_SELECTOR) || hasExcludedDescendant(child))) {
           wrapper = null;
           wrappers.push(...wrapSourceContent(child));
           continue;
@@ -1520,7 +1559,7 @@
       context.protectedNodes.push(node);
       return ` [[PGL_CODE_${index}]] `;
     }
-    if (!originalWrapper && node.matches(TEXT_SKIP_SELECTOR)) return '';
+    if (!originalWrapper && (node.matches(TEXT_SKIP_SELECTOR) || isSiteExcluded(node))) return '';
     const style = readStyle(node, context);
     if (!originalWrapper && hiddenStyle(style)) return '';
     if (node.tagName === 'BR') return ' ';
@@ -1617,7 +1656,7 @@
     if (!el || !el.isConnected || !el.tagName) return false;
     if (el === document.body || el === document.documentElement) return false;
     if (el.closest('#' + HOST_ID + ',.et-translation')) return false;
-    if (el.closest(SKIP_CLOSEST_SELECTOR) || el.closest(SITE_SKIP_SELECTOR)) return false;
+    if (el.closest(SKIP_CLOSEST_SELECTOR) || el.closest(SITE_SKIP_SELECTOR) || isSiteExcluded(el)) return false;
     const state = elementStates.get(el);
     if (state && ['done', 'queued', 'active'].includes(state.status)) return false;
     return isWorthTranslating(getSourceText(el, context), el);
@@ -1641,14 +1680,14 @@
   function* attributeCandidates(el, context) {
     if (el.closest('#' + HOST_ID + ',.et-translation,.et-source-hidden,pre,code,kbd,samp,' +
       '[contenteditable],[translate="no"],.notranslate,[hidden],[aria-hidden="true"],[inert]') ||
-      el.closest(SITE_SKIP_SELECTOR) || hiddenStyle(readStyle(el, context)) || insideClosedDetails(el)) return;
+      el.closest(SITE_SKIP_SELECTOR) || isSiteExcluded(el) || hiddenStyle(readStyle(el, context)) || insideClosedDetails(el)) return;
     if (el.matches('input[type="password"],input[type="hidden"]')) return;
     for (let parent = el.parentElement; parent; parent = parent.parentElement) {
       if (hiddenStyle(readStyle(parent, context))) return;
     }
     const names = ['title', 'aria-label'];
     if (el.matches('input,textarea')) names.push('placeholder');
-    if (el.matches('img,area')) names.push('alt');
+    if (el.matches('img,area,input[type="image"]')) names.push('alt');
     if (el.matches('input[type="button"],input[type="submit"],input[type="reset"]')) names.push('value');
     if (el.matches('option,optgroup')) names.push('label');
     for (const name of names) {
@@ -1680,7 +1719,7 @@
     if (isEligibleTextBlock(el, context)) yield el;
     // A sentence may merge inline descendants while their attributes need
     // independent targets, including options whose visible label is implicit.
-    for (const child of el.querySelectorAll('[title],[aria-label],input,textarea,img,select,option,optgroup')) {
+    for (const child of el.querySelectorAll('[title],[aria-label],input,textarea,img,area,select,option,optgroup')) {
       yield* attributeCandidates(child, context);
     }
   }
@@ -1693,7 +1732,7 @@
     for (let ancestor = base; ancestor; ancestor = ancestor.parentElement) {
       if (hiddenStyle(readStyle(ancestor, context))) return;
     }
-    const skipped = el => !!el.closest(SKIP_CLOSEST_SELECTOR) || !!el.closest(SITE_SKIP_SELECTOR);
+    const skipped = el => !!el.closest(SKIP_CLOSEST_SELECTOR) || !!el.closest(SITE_SKIP_SELECTOR) || isSiteExcluded(el);
 
     function* childrenOf(el) {
       const summary = el.matches('details:not([open])') ? el.querySelector(':scope > summary') : null;
@@ -2168,10 +2207,12 @@
 
   function startUrlWatcher() {
     if (session.urlTimer) return;
-    session.lastRoute = location.pathname + location.search;
+    const routeKey = () => location.pathname + location.search +
+      (/^#(?:\/|!\/)/.test(location.hash || '') ? location.hash : '');
+    session.lastRoute = routeKey();
     session.urlTimer = window.setInterval(() => {
       if (!session.active) return;
-      const route = location.pathname + location.search;
+      const route = routeKey();
       if (route === session.lastRoute) return;
       session.lastRoute = route;
       reportStatus({ kind: 'working', message: '检测到页面切换，正在重新翻译…' });
@@ -3120,7 +3161,11 @@ h6 > .et-translation[data-mode="only"] {
   width: 100%; height: 31px; padding: 0 7px; border: 1px solid #dbe3ee; border-radius: 8px;
   background: #fff; color: #172033; font: inherit; font-size: 12px; outline: none;
 }
-.field select:focus, .field input:focus { border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,.13); }
+  .field textarea {
+    width: 100%; min-height: 58px; padding: 6px 7px; border: 1px solid #dbe3ee; border-radius: 8px;
+    background: #fff; color: #172033; font: inherit; font-size: 12px; outline: none; resize: vertical;
+  }
+  .field select:focus, .field input:focus, .field textarea:focus { border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,.13); }
 .checks { display: flex; flex-direction: column; gap: 7px; margin-top: 10px; padding-top: 10px; border-top: 1px solid #eef2f7; }
 .check { display: flex; align-items: center; gap: 7px; color: #334155; font-size: 12.5px; cursor: pointer; }
 .check input { width: 14px; height: 14px; margin: 0; accent-color: #2563eb; }
@@ -3164,7 +3209,7 @@ details.more[open] summary { margin-bottom: 8px; }
   .status { color: #94a3b8; }
   .provider-tag { color: #a9b8cb; background: #1d2838; border-color: #2a3b50; }
   .field { color: #94a3b8; }
-  .field select, .field input { background: #101826; color: #e5edf8; border-color: #2a3b50; }
+  .field select, .field input, .field textarea { background: #101826; color: #e5edf8; border-color: #2a3b50; }
   .checks, details.more, .sel-foot { border-top-color: #223044; }
   .check { color: #c7d4e4; }
   .mini-btn { color: #c7d4e4; background: #1a2433; border-color: #2a3b50; }
@@ -3271,6 +3316,13 @@ details.more[open] summary { margin-bottom: 8px; }
       <button class="mini-btn" type="button" data-action="reset-pos">重置按钮位置</button>
     </div>
   </details>
+  <details class="more">
+    <summary>本网站规则</summary>
+    <label class="field">排除 CSS 选择器（每行一个）
+      <textarea data-field="siteExclude" rows="3" spellcheck="false" placeholder="例如：\n.comments\n[data-ad]"></textarea>
+    </label>
+    <p class="hint">匹配的区域不会进入翻译队列，也不会被隐藏。适合排除评论、广告、价格或网站自定义组件。</p>
+  </details>
   <p class="hint">页面较小时自动整页翻译；页面过大时只翻译当前屏幕，滚动后继续。勾选“强制整页”可跳过此限制。</p>
   <p class="hint">单击“译”翻译或恢复，右键打开或关闭设置。自动模式在接口较慢时尝试另一条免费线路，采用先完成的结果；DeepL 仅在失败后兜底。只发送需要翻译的文本。</p>
 </section>
@@ -3316,6 +3368,7 @@ details.more[open] summary { margin-bottom: 8px; }
       selection: shadow.querySelector('[data-field="selection"]'),
       siteAuto: shadow.querySelector('[data-field="siteAuto"]'),
       siteDisabled: shadow.querySelector('[data-field="siteDisabled"]'),
+      siteExclude: shadow.querySelector('[data-field="siteExclude"]'),
       shortcutToggle: shadow.querySelector('[data-field="shortcutToggle"]'),
       shortcutPanel: shadow.querySelector('[data-field="shortcutPanel"]'),
       retry: shadow.querySelector('[data-action="retry"]'),
@@ -3492,6 +3545,24 @@ details.more[open] summary { margin-bottom: 8px; }
       updateUi();
     });
 
+    const applySiteExclude = () => {
+      const value = String(ui.siteExclude.value || '').slice(0, 2000);
+      const previous = getSiteSettings().exclude || '';
+      patchSiteSettings({ exclude: value });
+      siteExcludeCache = { host: '', raw: '', selector: '', invalid: [] };
+      const invalid = siteExcludeParts().invalid;
+      if (invalid.length) {
+        ui.siteExclude.value = value;
+        reportStatus({ kind: 'error', message: '已保存，但有无效选择器：' + invalid.slice(0, 2).join('、') });
+      } else {
+        reportStatus({ kind: session.active ? 'working' : 'idle', message: value.trim() ? '本站排除规则已保存' : '本站排除规则已清空' });
+      }
+      if (session.active && previous !== value) restartTranslation();
+      else syncUi();
+    };
+    ui.siteExclude.addEventListener('change', applySiteExclude);
+    ui.siteExclude.addEventListener('blur', applySiteExclude);
+
     ui.shortcutToggle.addEventListener('change', () => applyShortcutField('toggle'));
     ui.shortcutToggle.addEventListener('blur', () => applyShortcutField('toggle'));
     ui.shortcutPanel.addEventListener('change', () => applyShortcutField('panel'));
@@ -3574,6 +3645,7 @@ details.more[open] summary { margin-bottom: 8px; }
     const site = getSiteSettings();
     ui.siteAuto.checked = !!site.auto;
     ui.siteDisabled.checked = !!site.disabled;
+    ui.siteExclude.value = site.exclude || '';
     ui.shortcutToggle.value = settings.shortcuts.toggle;
     ui.shortcutPanel.value = settings.shortcuts.panel;
   }
@@ -3612,6 +3684,7 @@ details.more[open] summary { margin-bottom: 8px; }
     ui.retry.disabled = !active || session.failedElements.size === 0;
     ui.siteAuto.checked = !!site.auto;
     ui.siteDisabled.checked = !!site.disabled;
+    ui.siteExclude.value = site.exclude || '';
   }
 
   function togglePanel() {

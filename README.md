@@ -2,7 +2,7 @@
 
 **让网页以两种语言展开。 / Read the web in two languages.**
 
-`v0.9.1` · 单文件用户脚本 · Tampermonkey / ScriptCat
+`v0.10.0` · 单文件用户脚本 · Tampermonkey / ScriptCat
 
 [简体中文](#简体中文) · [English](#english)
 
@@ -14,7 +14,7 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 
 点击页面边缘的「译」按钮，即可翻译网页，默认只显示中文译文；取消「仅显示译文」可恢复双语对照，再次点击按钮恢复原文。
 
-当前版本：`0.9.1`。直接查看安装文件：[edge-translator.user.js](edge-translator.user.js)。
+当前版本：`0.10.0`。直接查看安装文件：[edge-translator.user.js](edge-translator.user.js)。
 
 ### v0.9.1：文件树、正文链接与分轮显示修复
 
@@ -24,6 +24,14 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 - 默认恢复自适应范围：普通页面整页一起显示，大页面只翻译当前屏幕。旧版升级会把范围迁回自适应，其他设置保留；需要强制整页时可重新勾选并保存。
 - 每轮固定待翻译内容，动态新增内容进入后续轮次，避免首轮结果一直等待；每轮仍统一显示。
 - 关闭划词弹窗或重新划词时取消旧请求，包括接口队列中的等待任务。
+
+### v0.10.0：站点排除规则与动态路由优化
+
+- 设置面板新增“本网站规则”，可以按行填写 CSS 选择器，排除评论、广告、价格、推荐卡片或自定义组件；规则按域名保存，启用后会重新扫描当前页面。
+- 排除区域不会进入翻译队列，也不会在仅译文模式中被隐藏；无效选择器会提示并忽略，不会让脚本停止。
+- 补充特殊控件提示文本处理，并保留被排除区域的原始节点。
+- Hash 路由页面支持 `#/...` 和 `#!/...` 变化检测，普通锚点跳转不会触发整页重翻译。
+- 翻译接口丢失部分行内代码占位符时，仍保留所有原始代码节点。
 
 ### v0.9.0：补齐 Markdown、README 和行内代码
 
@@ -60,7 +68,7 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 - **对比实测**：与 v0.6.0 各交替运行 3 次，在每次 600ms 的模拟网络下，Google 24 段从 24 次请求、约 9.85 秒降为 1 次、约 0.62 秒。真实 Google POST 120 段已返回 HTTP 200 和完整译文，单次约 3.9 秒。模拟数字不代表真实网络速度。
 - **保留已有优化**：两个批次并发、划词优先、取消与重试、免费 Key 保护、接口隔离缓存和动态内容清理继续生效。
 
-升级后确认版本为 **0.9.1**，刷新网页。右键“译”可调整设置；需要自动择快时，将接口设为「自动择快（推荐）」并开启「接口失败时自动回退」。升级仅将旧版翻译范围迁回自适应，其他设置保留。
+升级后确认版本为 **0.10.0**，刷新网页。右键“译”可调整设置；需要自动择快时，将接口设为「自动择快（推荐）」并开启「接口失败时自动回退」。旧版设置会保留；需要排除评论、广告或推荐区域时，可在“本网站规则”中填写 CSS 选择器。
 
 ### v0.3.0 新增：仅译文模式
 
@@ -174,7 +182,7 @@ Key 只保存在脚本管理器本地存储中，只会发送给 DeepL 官方端
 - 只处理顶层页面（`@noframes`）；严格 CSP 网站可能阻止页面样式或脚本注入。
 - 免费接口可能限流、变更或在特定网络不可达；自动模式可以减少慢线路等待，但两条线路都不可达时仍会失败。固定接口仍受其自身响应速度限制。
 - DeepL 需要用户自己的 API Key；脚本不会创建或升级 DeepL 付费账户。
-- 关闭强制整页后，大型单页应用、虚拟列表和频繁改写的页面达到规模阈值时会自动只处理当前屏幕，仍可能需要站点级排除规则；当前版本没有图形化的站点规则编辑器。
+- 关闭强制整页后，大型单页应用、虚拟列表和频繁改写的页面达到规模阈值时会自动只处理当前屏幕；虚拟列表仍可能需要填写站点级排除规则。
 - 仅译文模式会隐藏合并正文块内的链接；需要点击这类正文链接时请切回双语模式。单独翻译的导航链接和按钮可继续使用，图片、代码和明确不翻译的内容会保留。少数依赖直接子节点的网页脚本可能在隐藏/恢复期间表现异常。
 - 多标签页同时翻译时，各标签页独立限流；不会造成单页请求风暴，但不是全局配额管理。
 
@@ -230,7 +238,14 @@ PageLingo (Bilingual Web Page Translation) is a single-file userscript for Micro
 
 Click the **译** button at the edge of a page to translate it into Chinese. Translation-only mode is enabled by default; disable it for bilingual reading, or click the button again to restore the original page.
 
-Current version: `0.9.1`. View the userscript file: [edge-translator.user.js](edge-translator.user.js).
+Current version: `0.10.0`. View the userscript file: [edge-translator.user.js](edge-translator.user.js).
+
+### New in 0.10.0: site exclusion rules and dynamic route handling
+
+- Add per-site CSS exclusion rules in the settings panel. Enter one selector per line to exclude comments, ads, prices, recommendations, or custom widgets.
+- Excluded regions never enter the translation queue and remain visible in translation-only mode. Invalid selectors are reported and ignored without stopping the script.
+- Improve special control hint coverage, preserve excluded source nodes, and keep all protected inline-code nodes when a provider drops a placeholder.
+- Detect `#/...` and `#!/...` hash-router changes while ignoring ordinary anchor jumps.
 
 ### New in 0.9.1: file trees, working inline links, and bounded translation rounds
 
@@ -276,7 +291,7 @@ Current version: `0.9.1`. View the userscript file: [edge-translator.user.js](ed
 - **Measured completion time**: three alternating runs against v0.6.0, 24 Google paragraphs and 600ms simulated requests: about 9.85s / 24 requests became 0.62s / one request. A separate live Google POST returned all 120 translations with HTTP 200 in about 3.9s. Simulated timings do not predict real network speed.
 - **Existing protections remain**: two concurrent page batches, selection priority, cancellation, free-key protection, provider-aware cache, and dynamic-node cleanup.
 
-After upgrading, confirm **0.9.1** and reload the target page. Right-click **译** to adjust settings; select automatic routing and enable automatic fallback when desired. Older scope settings migrate to adaptive mode; other preferences remain saved.
+After upgrading, confirm **0.10.0** and reload the target page. Right-click **译** to adjust settings; select automatic routing and enable automatic fallback when desired. Older settings remain saved; use **Site rules** to exclude comments, ads, recommendations, or custom regions with CSS selectors.
 
 ### New in 0.3.0: translation-only mode
 
@@ -390,7 +405,7 @@ The key is stored only in the userscript manager's local storage and is sent onl
 - Only the top-level page is processed (`@noframes`). Sites with strict CSP may block injected page styles or scripts.
 - Free providers may rate-limit, change, or become unreachable. Automatic routing reduces waits for a slow route, but fails if both are unreachable. A fixed provider remains limited by its own response speed.
 - DeepL requires your own API key; PageLingo does not create or upgrade paid DeepL accounts.
-- With forced full-page mode off, large single-page apps, virtualized lists, and frequently rewritten pages are limited to the current screen after reaching the size threshold, but may still need site-level exclusion rules. There is no graphical site-rule editor in the current version.
+- With forced full-page mode off, large single-page apps, virtualized lists, and frequently rewritten pages are limited to the current screen after reaching the size threshold, but virtualized lists may still need site-level exclusion rules.
 - Inline links and buttons stay usable, and images, code, and protected content stay visible. Sentences containing controls are split at interaction boundaries. A few sites whose scripts depend on direct child nodes may behave unexpectedly while content is hidden or restored.
 - When several tabs translate at once, each tab rate-limits independently. This avoids request storms within one page, but is not a global quota manager.
 
@@ -421,12 +436,12 @@ Checks performed locally on 2026-10-22:
 - **Microsoft production smoke test**: one 120-item request returned HTTP 200 and 120 non-empty translations in about 3.2 seconds. This real endpoint measurement is separate from the fixed-latency simulation.
 - **v0.7.0 regression checks**: 57 browser tests include Google batches and response validation, automatic routing and cancellation, cache across reloads/expiration/disabling/clearing, request-free display switches, and single-click controls.
 - **v0.9.0 Markdown coverage and regression**: all 81 browser tests pass, including README/Markdown headings, file names, versions, punctuation-rich sentences, GitHub documentation filenames, and inline-code protection. The benchmark keeps Google's 24-item batch at one request and about 620ms, automatic routing for 120 paragraphs at about 645ms, Microsoft batching at about 643ms, and reload cache hits at about 13ms under simulated conditions.
-- **v0.9.1 acceptance (2026-10-24)**: all 95 browser tests pass. Three alternating runs against v0.9.0 keep the equal-workload Microsoft 120-item batch at one request and about 644ms, Google's 24-item batch at about 620ms, and reload cache hits at about 12ms. A separate default-settings comparison on a 400-paragraph page reduces submitted text from 400 items / four requests to 24 visible items / one request, reducing median first-display wait from about 1.52s to 0.65s with 600ms simulated responses. The latter compares different scopes, not equal full-document translation work.
+- **v0.10.0 acceptance (2026-10-24)**: all 96 browser tests pass. The release adds per-site CSS exclusion rules, invalid-selector handling, special control coverage, protected-inline recovery, and hash-router detection. The v0.9.1 batch benchmarks remain unchanged because the new rules only affect candidate filtering.
 - Installation, permission, and upgrade acceptance in real Tampermonkey / ScriptCat extensions is still pending, and DeepL has not been tested with a real key. These remain the required manual tests before release.
 
 ### Implementation notes
 
-To keep installation and distribution simple, v0.9.1 is a single `.user.js` file with no build step. The file is organized into settings, requests, provider adapters, extraction, scheduling, rendering, and UI sections.
+To keep installation and distribution simple, v0.10.0 is a single `.user.js` file with no build step. The file is organized into settings, requests, provider adapters, extraction, scheduling, rendering, and UI sections.
 
 Development checks use Node.js and Playwright: `npm ci`, `npm run check`, `npm test`, and `npm run bench`. Tests prefer a local Edge installation or `PAGELINGO_BROWSER_PATH`. Without Edge, first run `npx playwright install chromium`. Requests are mocked; benchmark results are written to `tests/results/benchmark.json`. See [tests/README.md](tests/README.md).
 
