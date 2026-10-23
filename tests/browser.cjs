@@ -36,7 +36,7 @@ function paragraphs(count, extra = '') {
   ).join('') + '</main>';
 }
 
-async function fixture(browser, html, { settings = {}, mock = {}, source, viewport, storage = {} } = {}) {
+async function fixture(browser, html, { settings = {}, mock = {}, source, viewport, storage = {}, freshInstall = false } = {}) {
   const page = await browser.newPage({ viewport: viewport || { width: 1280, height: 900 } });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -46,15 +46,15 @@ async function fixture(browser, html, { settings = {}, mock = {}, source, viewpo
     : route.abort());
   await page.goto('http://pagelingo.test/test');
   const boot = async stored => {
-    await page.evaluate(({ settings, mock, stored }) => {
+    await page.evaluate(({ settings, mock, stored, freshInstall }) => {
       window.__calls = [];
       window.__writes = [];
-      window.__store = { 'et:settings:v1': JSON.stringify({
+      window.__store = { ...(freshInstall ? {} : { 'et:settings:v1': JSON.stringify({
         // Keep feature scenarios explicit when installation defaults change.
-        schemaVersion: 4, provider: 'microsoft', targetLang: 'zh-CN', autoFallback: false,
+        schemaVersion: 5, provider: 'microsoft', targetLang: 'zh-CN', autoFallback: false,
         allowLowQuality: false, fullPage: false, translationOnly: false, showOriginal: true, persistentCache: true,
         ...settings,
-      }), ...stored };
+      }) }), ...stored };
       window.GM_getValue = mock.noGMStorage ? undefined : (key, fallback) => window.__store[key] ?? fallback;
       window.GM_setValue = mock.noGMStorage ? undefined : (key, value) => {
         window.__store[key] = value; window.__writes.push({ key, value });
@@ -86,7 +86,7 @@ async function fixture(browser, html, { settings = {}, mock = {}, source, viewpo
           if (mock.rejectLarge && texts.length > 32) status = 413;
           if (provider === 'deepl' && texts.length > 50) status = 400;
           if (status !== 200) return options.onload({ status, responseText: '', responseHeaders: mock.headers || '' });
-          const translate = text => `${provider}/${target}::${text}`;
+          const translate = text => mock.translations?.[text] ?? `${provider}/${target}::${text}`;
           let response = provider === 'microsoft' ? texts.map(text => ({ translations: [{ text: translate(text) }] }))
             : provider === 'deepl' ? { translations: texts.map(text => ({ text: translate(text) })) }
             : provider === 'google' ? url.pathname.endsWith('/t')
@@ -114,7 +114,7 @@ async function fixture(browser, html, { settings = {}, mock = {}, source, viewpo
         }
       });
       window.__renderObserver.observe(document.body, { childList: true, subtree: true });
-    }, { settings, mock, stored });
+    }, { settings, mock, stored, freshInstall });
     await page.addScriptTag({ content: instrument(source || fs.readFileSync(scriptPath, 'utf8')) });
   };
   await boot(storage);

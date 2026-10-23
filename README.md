@@ -2,7 +2,7 @@
 
 **让网页以两种语言展开。 / Read the web in two languages.**
 
-`v0.9.0` · 单文件用户脚本 · Tampermonkey / ScriptCat
+`v0.9.1` · 单文件用户脚本 · Tampermonkey / ScriptCat
 
 [简体中文](#简体中文) · [English](#english)
 
@@ -14,7 +14,16 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 
 点击页面边缘的「译」按钮，即可翻译网页，默认只显示中文译文；取消「仅显示译文」可恢复双语对照，再次点击按钮恢复原文。
 
-当前版本：`0.9.0`。直接查看安装文件：[edge-translator.user.js](edge-translator.user.js)。
+当前版本：`0.9.1`。直接查看安装文件：[edge-translator.user.js](edge-translator.user.js)。
+
+### v0.9.1：文件树、正文链接与分轮显示修复
+
+- GitHub 表格和侧边文件树中的 `README.md`、`PLAN.md`、`REVIEW.md` 等文档名称提供中文兜底；标签被译成中文后仍可识别，扩展名和原始链接保持不变。
+- 正文链接和按钮单独保留原节点，文字与前后内容共用批量请求；仅译文模式仍可点击，绑定事件和目标地址保持可用。含链接的句子会按交互边界拆分翻译。
+- 长段落部分分片失败时保留整段原文并显示已成功译文，重试全部成功后才隐藏原文。
+- 默认恢复自适应范围：普通页面整页一起显示，大页面只翻译当前屏幕。旧版升级会把范围迁回自适应，其他设置保留；需要强制整页时可重新勾选并保存。
+- 每轮固定待翻译内容，动态新增内容进入后续轮次，避免首轮结果一直等待；每轮仍统一显示。
+- 关闭划词弹窗或重新划词时取消旧请求，包括接口队列中的等待任务。
 
 ### v0.9.0：补齐 Markdown、README 和行内代码
 
@@ -32,7 +41,7 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 - **保留批量速度**：界面提示与正文共用批量队列、去重、缓存和统一显示；关闭强制整页时，它们也遵守大页面只翻译当前屏幕的范围。
 - **控件排版与还原**：导航链接和按钮的译文保持紧凑显示，保留按钮图标；仅译文模式保留代码及明确不翻译的部分，恢复时还原节点顺序和属性。
 
-### v0.7.2：默认开启强制整页
+### v0.7.2：默认开启强制整页（历史配置，v0.9.1 已调整范围）
 
 - 接口默认为「微软（免费推荐）」，目标语言为「简体中文」。
 - 默认开启「允许 MyMemory 低质量兜底」「强制整页（含导航/侧栏）」「仅显示译文」「划词翻译」。
@@ -51,14 +60,14 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 - **对比实测**：与 v0.6.0 各交替运行 3 次，在每次 600ms 的模拟网络下，Google 24 段从 24 次请求、约 9.85 秒降为 1 次、约 0.62 秒。真实 Google POST 120 段已返回 HTTP 200 和完整译文，单次约 3.9 秒。模拟数字不代表真实网络速度。
 - **保留已有优化**：两个批次并发、划词优先、取消与重试、免费 Key 保护、接口隔离缓存和动态内容清理继续生效。
 
-升级后确认版本为 **0.9.0**，刷新网页。右键“译”可调整设置；需要自动择快时，将接口设为「自动择快（推荐）」并开启「接口失败时自动回退」。已有设置不会被升级覆盖。
+升级后确认版本为 **0.9.1**，刷新网页。右键“译”可调整设置；需要自动择快时，将接口设为「自动择快（推荐）」并开启「接口失败时自动回退」。升级仅将旧版翻译范围迁回自适应，其他设置保留。
 
 ### v0.3.0 新增：仅译文模式
 
 - 在面板勾选「仅显示译文（隐藏原文）」，页面会隐藏原英文，只显示译文，更接近沉浸式翻译的“仅译文”阅读方式。
-- 原文节点、链接和目标地址仍保留在页面中，只是暂时隐藏；取消勾选或点击「恢复原文」会完整还原。
+- 原文节点仍保留在页面中，取消勾选或点击「恢复原文」会完整还原。正文链接和按钮保留可见的原始交互节点。
 - 双语/仅译文切换直接修改显示，不重新翻译；切换语言、接口或范围会按新的策略扫描，命中相应缓存时复用。
-- 正文块内的图片、链接和交互内容会随原文一起隐藏，这是替换式阅读的取舍；需要点击正文链接时请切回双语模式。
+- 图片、代码、明确不翻译的部分，以及单独翻译的链接和按钮保持可用；部分分片失败的段落保留完整原文。
 
 ### v0.2.0 主要更新
 
@@ -86,7 +95,7 @@ PageLingo（双语网页翻译）是一个面向 Microsoft Edge 的单文件用�
 
 | 操作 | 说明 |
 | --- | --- |
-| 点击「译」 | 默认翻译整页，包含导航和侧栏；关闭强制整页后，大页面只翻译当前屏幕，滚动后继续 |
+| 点击「译」 | 默认自适应：普通页面整页一起翻译，包含导航和侧栏；大页面只翻译当前屏幕，滚动后继续 |
 | 再次点击「译」 | 恢复原文，移除译文和临时容器，还原提示属性 |
 | 右键「译」或 `Alt+O` | 打开面板，选择接口、目标语言、站点自动翻译、禁用网站等 |
 | 勾选「仅显示译文」 | 隐藏原文，只显示译文；取消勾选恢复双语 |
@@ -122,14 +131,14 @@ Key 只保存在脚本管理器本地存储中，只会发送给 DeepL 官方端
 
 ### 覆盖模式
 
-- **强制整页模式（默认）**：包含导航、页脚和侧栏，跳过大页面的自适应范围限制；部分网站的顶部栏布局可能发生变化。
-- **自适应范围模式**：取消勾选「强制整页（含导航/侧栏）」后，仍覆盖导航和控件文字；普通页面整页翻译，大页面仅翻译当前屏幕，滚动后继续。
+- **强制整页模式（可选）**：包含导航、页脚和侧栏，跳过大页面的自适应范围限制；部分网站的顶部栏布局可能发生变化。
+- **自适应范围模式（默认）**：覆盖导航和控件文字；普通页面整页翻译，大页面仅翻译当前屏幕，滚动后继续。
 - 两种模式都保留原文节点；恢复时移除译文、解开临时容器，并还原提示属性。
 
 ### 稳定性设计
 
 - **通用文本块识别**：根据布局提取正文和界面短词，包含导航、页脚、按钮、行内文字及常见提示属性；跳过 `pre`、`code`、表单输入值、密码、`contenteditable` 和 `translate="no"`。
-- **自适应范围**：关闭强制整页后，先统计候选文本块；不超过 160 块且约 32000 字符时整页处理，大页面用 `IntersectionObserver` 只处理当前屏幕。动态增长的页面达到阈值后同样切换范围。
+- **自适应范围**：默认先统计候选文本块；不超过 160 块且约 32000 字符时整页处理，大页面用 `IntersectionObserver` 只处理当前屏幕。动态增长的页面达到阈值后同样切换范围。
 - **批量与限速**：微软和 Google 每批最多 128 段、约 24000 字符，DeepL 最多 50 段、约 24000 字符；页面最多并发 2 个逻辑批次，每接口最多 2 个请求（MyMemory 1 个）。自动择快可能同时使用两条线路；同接口间隔初始为 250ms（Google 400ms，MyMemory 1000ms），请求超时 10 秒，429 后冷却。
 - **划词优先**：划词请求会在接口队列中优先于普通页面批次，减少手动翻译等待。
 - **可中断扫描**：候选文本按约 6ms 的协作分片扫描；整页模式先收集再批量排队，大页面只提交当前屏幕的内容。
@@ -197,11 +206,12 @@ Key 只保存在脚本管理器本地存储中，只会发送给 DeepL 官方端
 - **v0.7.0 回归**：仓库内保留 57 个浏览器测试，增加 Google 真批量、响应数量和空值校验、自动择快及取消、缓存跨刷新复用/到期/关闭/清除、零请求显示切换和单击操作等断言。
 - **v0.8.0 覆盖与速度（2026-10-23）**：79 项浏览器回归通过。针对 GitHub 风格界面构建的 20 项文字模拟夹具中，v0.7.2 提取 5 项，v0.8.0 提取全部 20 项，两版均为一次批量请求；该结果不代表所有网站的覆盖率。与 v0.7.2 交替运行 3 轮，120 段正文在 600ms 模拟响应下的完整显示中位耗时均约 635ms。另以 8 个公开界面词测试真实微软端点，HTTP 200、返回完整译文，约 0.85 秒；真实速度随网络变化。
 - **v0.9.0 Markdown 完整度与回归（2026-10-23）**：81 项浏览器回归全部通过，新增 README/Markdown 标题、文件名、版本号、标点句子、GitHub 文档文件名和行内代码保护测试。基准中 Google 批量 24 段保持 1 次请求、约 620ms；自动择快 120 段约 645ms；微软批量 120 段约 643ms；刷新命中缓存约 13ms。模拟数据用于比较调度策略，真实速度随网络变化。
+- **v0.9.1 修复验收（2026-10-24）**：94 项浏览器回归通过。与 v0.9.0 各交替运行 3 轮，固定工作量的微软 120 段保持 1 次请求、约 644ms，Google 24 段约 620ms，刷新缓存约 12ms。另以默认配置比较 400 段长页：旧版提交 400 段/4 次请求，新版只提交初始视口 24 段/1 次请求；在每次 600ms 模拟响应下，首屏显示中位耗时约从 1.52 秒降至 0.65 秒。后者工作量不同，反映范围调整带来的首屏等待变化，不代表同等全文翻译量的加速。
 - 尚未在真实 Tampermonkey / ScriptCat 扩展中完成安装、权限和升级验收，也尚未用真实 DeepL Key 调用；这是发布前剩余的人工测试。
 
 ### 实现说明
 
-为了安装和分发简单，v0.9.0 使用单个 `.user.js` 文件，不依赖构建工具。文件内按“设置 / 请求 / 接口适配 / 提取 / 调度 / 渲染 / 界面”分段组织。
+为了安装和分发简单，v0.9.1 使用单个 `.user.js` 文件，不依赖构建工具。文件内按“设置 / 请求 / 接口适配 / 提取 / 调度 / 渲染 / 界面”分段组织。
 
 开发验证使用 Node.js 和 Playwright，不影响用户安装。运行 `npm ci`、`npm run check`、`npm test`；速度对比运行 `npm run bench`。测试会优先使用本机 Edge，也可通过 `PAGELINGO_BROWSER_PATH` 指定浏览器；没有 Edge 时先执行 `npx playwright install chromium`。自动化使用模拟接口，基准报告写入 `tests/results/benchmark.json`；详见 [tests/README.md](tests/README.md)。
 
@@ -220,7 +230,16 @@ PageLingo (Bilingual Web Page Translation) is a single-file userscript for Micro
 
 Click the **译** button at the edge of a page to translate it into Chinese. Translation-only mode is enabled by default; disable it for bilingual reading, or click the button again to restore the original page.
 
-Current version: `0.9.0`. View the userscript file: [edge-translator.user.js](edge-translator.user.js).
+Current version: `0.9.1`. View the userscript file: [edge-translator.user.js](edge-translator.user.js).
+
+### New in 0.9.1: file trees, working inline links, and bounded translation rounds
+
+- Translate common GitHub documentation filenames in tables and sidebar trees even after accessibility labels change. Keep extensions, technical identifiers, and link destinations intact.
+- Keep original links and buttons interactive in translation-only prose. Translate their captions and surrounding text in the same batch; sentences containing controls are divided at interaction boundaries.
+- Keep the entire source paragraph visible when any long-text chunk fails, until all chunks succeed on retry.
+- Use adaptive scope by default: ordinary pages translate together; large pages request the current viewport. Older settings migrate scope once; other preferences remain saved, and forced full-page mode can be explicitly re-enabled.
+- Freeze each display round so continuous feed updates cannot postpone the first complete result. Newly discovered content joins later rounds.
+- Cancel active and queued selection requests when the card closes or a new selection replaces them.
 
 ### New in 0.9.0: complete Markdown and inline-code coverage
 
@@ -238,7 +257,7 @@ Current version: `0.9.0`. View the userscript file: [edge-translator.user.js](ed
 - **Shared batching**: interface hints use the same batching, deduplication, cache, and render commit as ordinary text, including viewport limits on large pages when forced full-page mode is off.
 - **Controls and restoration**: keep navigation and button translations compact, preserve icons and protected content, and restore original attributes and node order.
 
-### New in 0.7.2: force full page by default
+### New in 0.7.2: force full page by default (historical; scope changed in 0.9.1)
 
 - Provider: Microsoft; target language: Simplified Chinese.
 - Enabled: low-quality MyMemory fallback permission, forced full-page mode (including navigation/sidebar), translation-only mode, and selection translation.
@@ -257,14 +276,14 @@ Current version: `0.9.0`. View the userscript file: [edge-translator.user.js](ed
 - **Measured completion time**: three alternating runs against v0.6.0, 24 Google paragraphs and 600ms simulated requests: about 9.85s / 24 requests became 0.62s / one request. A separate live Google POST returned all 120 translations with HTTP 200 in about 3.9s. Simulated timings do not predict real network speed.
 - **Existing protections remain**: two concurrent page batches, selection priority, cancellation, free-key protection, provider-aware cache, and dynamic-node cleanup.
 
-After upgrading, confirm **0.8.0** and reload the target page. Right-click **译** to adjust settings; select automatic routing and enable automatic fallback when desired. Upgrades preserve saved settings.
+After upgrading, confirm **0.9.1** and reload the target page. Right-click **译** to adjust settings; select automatic routing and enable automatic fallback when desired. Older scope settings migrate to adaptive mode; other preferences remain saved.
 
 ### New in 0.3.0: translation-only mode
 
 - Enable **Show translation only (hide original)** in the panel to hide the source text and read only the translation, closer to Immersive Translate's translation-only reading mode.
-- Original nodes, links, and hrefs remain in the page in a temporary hidden container. Unchecking the option or clicking **Restore original** brings them back completely.
+- Original text nodes remain recoverable in temporary hidden containers. Original links and buttons stay visible and interactive. Unchecking the option or clicking **Restore original** restores the page.
 - Bilingual/translation-only changes update the existing display immediately. Language, provider, and scope changes rescan with the new policy and reuse matching cached translations.
-- Inline links merged into a translated paragraph are hidden with the source; switch to bilingual mode to use them. Independently translated navigation links and buttons stay usable, while images, code, and protected content remain visible.
+- Links and buttons are translated independently within the same batch. Images, code, and protected content remain visible; partially failed paragraphs keep their entire source.
 
 ### What's new in 0.2.0
 
@@ -328,8 +347,8 @@ The key is stored only in the userscript manager's local storage and is sent onl
 
 ### Coverage modes
 
-- **Forced full-page mode (default)**: includes navigation, footers, and sidebars and bypasses the large-page adaptive limit. Some site headers or menus may change layout.
-- **Adaptive scope**: disable **Force full page (including navigation/sidebar)** to translate normal pages in full and large pages one viewport at a time. Navigation and control captions remain included.
+- **Forced full-page mode (optional)**: includes navigation, footers, and sidebars and bypasses the large-page adaptive limit. Some site headers or menus may change layout.
+- **Adaptive scope (default)**: translate normal pages in full and large pages one viewport at a time. Navigation and control captions remain included.
 - Both modes preserve source nodes. Restoration removes translations, unwraps temporary containers, and restores hint attributes.
 
 ### Reliability and safety design
@@ -372,7 +391,7 @@ The key is stored only in the userscript manager's local storage and is sent onl
 - Free providers may rate-limit, change, or become unreachable. Automatic routing reduces waits for a slow route, but fails if both are unreachable. A fixed provider remains limited by its own response speed.
 - DeepL requires your own API key; PageLingo does not create or upgrade paid DeepL accounts.
 - With forced full-page mode off, large single-page apps, virtualized lists, and frequently rewritten pages are limited to the current screen after reaching the size threshold, but may still need site-level exclusion rules. There is no graphical site-rule editor in the current version.
-- Translation-only mode hides inline links merged into a translated paragraph. Switch back to bilingual mode to use those links. Independently translated navigation links and buttons remain usable, and images, code, and protected content stay visible. A few sites whose scripts depend on direct child nodes may behave unexpectedly while content is hidden or restored.
+- Inline links and buttons stay usable, and images, code, and protected content stay visible. Sentences containing controls are split at interaction boundaries. A few sites whose scripts depend on direct child nodes may behave unexpectedly while content is hidden or restored.
 - When several tabs translate at once, each tab rate-limits independently. This avoids request storms within one page, but is not a global quota manager.
 
 ### Verification notes
@@ -402,11 +421,12 @@ Checks performed locally on 2026-10-22:
 - **Microsoft production smoke test**: one 120-item request returned HTTP 200 and 120 non-empty translations in about 3.2 seconds. This real endpoint measurement is separate from the fixed-latency simulation.
 - **v0.7.0 regression checks**: 57 browser tests include Google batches and response validation, automatic routing and cancellation, cache across reloads/expiration/disabling/clearing, request-free display switches, and single-click controls.
 - **v0.9.0 Markdown coverage and regression**: all 81 browser tests pass, including README/Markdown headings, file names, versions, punctuation-rich sentences, GitHub documentation filenames, and inline-code protection. The benchmark keeps Google's 24-item batch at one request and about 620ms, automatic routing for 120 paragraphs at about 645ms, Microsoft batching at about 643ms, and reload cache hits at about 13ms under simulated conditions.
+- **v0.9.1 acceptance (2026-10-24)**: all 94 browser tests pass. Three alternating runs against v0.9.0 keep the equal-workload Microsoft 120-item batch at one request and about 644ms, Google's 24-item batch at about 620ms, and reload cache hits at about 12ms. A separate default-settings comparison on a 400-paragraph page reduces submitted text from 400 items / four requests to 24 visible items / one request, reducing median first-display wait from about 1.52s to 0.65s with 600ms simulated responses. The latter compares different scopes, not equal full-document translation work.
 - Installation, permission, and upgrade acceptance in real Tampermonkey / ScriptCat extensions is still pending, and DeepL has not been tested with a real key. These remain the required manual tests before release.
 
 ### Implementation notes
 
-To keep installation and distribution simple, v0.9.0 is a single `.user.js` file with no build step. The file is organized into settings, requests, provider adapters, extraction, scheduling, rendering, and UI sections.
+To keep installation and distribution simple, v0.9.1 is a single `.user.js` file with no build step. The file is organized into settings, requests, provider adapters, extraction, scheduling, rendering, and UI sections.
 
 Development checks use Node.js and Playwright: `npm ci`, `npm run check`, `npm test`, and `npm run bench`. Tests prefer a local Edge installation or `PAGELINGO_BROWSER_PATH`. Without Edge, first run `npx playwright install chromium`. Requests are mocked; benchmark results are written to `tests/results/benchmark.json`. See [tests/README.md](tests/README.md).
 

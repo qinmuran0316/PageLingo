@@ -24,9 +24,11 @@ check('bilingual restore preserves links and excludes code, forms and editors',
   '<pre>SECRET_CODE</pre><input value="SECRET_INPUT"><div contenteditable="true">SECRET_EDITOR</div></main>',
   {}, async page => {
     const before = await page.locator('main').innerHTML();
-    await start(page, 2);
+    await start(page, 3);
     const result = await inspect(page);
-    assert.equal(result.translated, 2);
+    assert.equal(result.translated, 3);
+    assert.equal(result.calls.length, 1);
+    assert.equal(await page.locator('a').getAttribute('href'), '/details');
     assert.ok(!result.calls.flatMap(call => call.texts).some(text => text.includes('SECRET_')));
     await page.evaluate(() => window.__TEST.stopTranslation());
     assert.equal(await page.locator('main').innerHTML(), before);
@@ -276,13 +278,15 @@ check('GitHub file rows translate documentation names without changing links',
   '<div class="react-directory-truncate"><a title="README.md" aria-label="README.md, (File)" ' +
   'class="Link--primary" href="/qinmuran0316/PageLingo/blob/main/README.md">README.md</a>' +
   '</div></div></div></div></td></tr></tbody></table>',
-  { settings: { translationOnly: true } }, async page => {
+  { settings: { translationOnly: true }, mock: { translations: {
+    'README.md': 'README.md', 'README.md, (File)': 'README.md，（文件）',
+  } } }, async page => {
     const before = await page.locator('table').innerHTML();
     await start(page, 1);
-    assert.equal(await page.locator('.et-translation').textContent(), 'microsoft/zh-Hans::说明文档.md');
-    assert.equal(await page.locator('a.Link--primary').getAttribute('title'), 'microsoft/zh-Hans::说明文档.md');
+    assert.equal(await page.locator('.et-translation').textContent(), '说明文档.md');
+    assert.equal(await page.locator('a.Link--primary').getAttribute('title'), '说明文档.md');
     assert.equal(await page.locator('a.Link--primary').getAttribute('aria-label'),
-      'microsoft/zh-Hans::说明文档.md, (File)');
+      '说明文档.md，（文件）');
     assert.equal(await page.locator('a.Link--primary').getAttribute('href'),
       '/qinmuran0316/PageLingo/blob/main/README.md');
     await page.evaluate(() => window.__TEST.stopTranslation());
@@ -965,4 +969,225 @@ check('one mouse click translates, right click opens settings, and another click
     await page.evaluate(() => window.__TEST.getUi().close.click());
     await page.mouse.click(rect.x, rect.y);
     assert.equal(await page.locator('.et-translation').count(), 0);
+  });
+
+check('translation-only prose keeps original links and buttons clickable in one batch',
+  '<main><p>Read <a id="docs" href="/docs"><strong>documentation</strong></a> before installing. ' +
+  '<button id="launch"><span>Launch</span></button></p></main>',
+  { settings: { translationOnly: true }, mock: { translations: {
+    Read: '阅读', documentation: '说明文档', 'before installing.': '后再安装。', Launch: '启动',
+  } } }, async page => {
+    const before = await page.locator('main').innerHTML();
+    await page.evaluate(() => {
+      window.__originalLink = document.getElementById('docs');
+      window.__clicks = [];
+      for (const id of ['docs', 'launch']) document.getElementById(id).addEventListener('click', event => {
+        event.preventDefault(); window.__clicks.push(id);
+      });
+    });
+    await start(page, 4);
+    assert.equal((await inspect(page)).calls.length, 1);
+    assert.equal(await page.locator('#docs .et-translation').textContent(), '说明文档');
+    assert.equal(await page.locator('#launch .et-translation').textContent(), '启动');
+    assert.equal(await page.locator('#docs').getAttribute('href'), '/docs');
+    await page.locator('#docs').click();
+    await page.locator('#launch').click();
+    assert.deepEqual(await page.evaluate(() => window.__clicks), ['docs', 'launch']);
+    assert.equal(await page.evaluate(() => window.__originalLink === document.getElementById('docs')), true);
+    await change(page, 'translationOnly', false);
+    await change(page, 'translationOnly', true);
+    assert.equal(await page.locator('#docs').isVisible(), true);
+    assert.equal((await inspect(page)).calls.length, 1);
+    await page.evaluate(() => window.__TEST.stopTranslation());
+    assert.equal(await page.locator('main').innerHTML(), before);
+  });
+
+const treeNames = ['README.md', 'PLAN.md', 'REVIEW.md', 'package.json', '.gitignore', 'edge-translator.user.js'];
+const fileTreeHtml = '<aside><ul role="tree">' + treeNames.map((name, index) =>
+  `<li role="treeitem"><a id="file${index}" title="${name}" aria-label="${name}，（文件）" ` +
+  `href="/owner/repo/blob/main/${index === 0 ? '%52EADME.md' : name}?plain=1#L1"><span>${name}</span></a></li>`
+).join('') + '</ul></aside>';
+const unchangedFilenames = Object.fromEntries(treeNames.map(name => [name, name]));
+
+check('GitHub sidebar file trees translate names with Chinese labels and preserve technical filenames',
+  fileTreeHtml, { settings: { translationOnly: true }, mock: { translations: unchangedFilenames } }, async page => {
+    const before = await page.locator('aside').innerHTML();
+    await start(page, 6);
+    assert.deepEqual(await page.locator('a .et-translation').allTextContents(),
+      ['说明文档.md', '计划.md', '审查.md', 'package.json', '.gitignore', 'edge-translator.user.js']);
+    assert.equal(await page.locator('#file0').getAttribute('href'), '/owner/repo/blob/main/%52EADME.md?plain=1#L1');
+    await change(page, 'translationOnly', false);
+    await change(page, 'translationOnly', true);
+    assert.equal(await page.locator('#file0 .et-translation').textContent(), '说明文档.md');
+    assert.equal((await inspect(page)).calls.length, 1);
+    await page.evaluate(() => window.__TEST.stopTranslation());
+    assert.equal(await page.locator('aside').innerHTML(), before);
+  });
+
+check('GitHub documentation filename aliases follow Traditional Chinese targets',
+  fileTreeHtml, { settings: { translationOnly: true, targetLang: 'zh-TW' }, mock: { translations: unchangedFilenames } },
+  async page => {
+    await start(page, 6);
+    assert.deepEqual((await page.locator('a .et-translation').allTextContents()).slice(0, 3),
+      ['說明文件.md', '計畫.md', '審查.md']);
+  });
+
+check('filename aliases do not rewrite ordinary prose links',
+  '<p>Open <a href="/owner/repo/blob/main/README.md">README.md</a>.</p>',
+  { settings: { translationOnly: true }, mock: { translations: unchangedFilenames } }, async page => {
+    await start(page, 2);
+    assert.equal(await page.locator('a .et-translation').textContent(), 'README.md');
+  });
+
+check('fresh installations translate a normal page completely in one batch', paragraphs(120),
+  { freshInstall: true }, async page => {
+    await start(page, 120);
+    const result = await inspect(page);
+    assert.equal(result.mode, 'all');
+    assert.equal(result.calls.length, 1);
+    assert.deepEqual(result.renders.map(render => render.count), [120]);
+    assert.equal(await page.locator('.et-source-hidden').count(), 120);
+    assert.equal(await page.evaluate(() => window.__TEST.settings.fullPage), false);
+  });
+
+check('fresh installations request only the viewport on large pages', paragraphs(400),
+  { freshInstall: true }, async page => {
+    const visible = await page.locator('main p').evaluateAll(nodes => nodes.filter(el => {
+      const rect = el.getBoundingClientRect(); return rect.bottom > 0 && rect.top < innerHeight;
+    }).map(el => el.textContent.trim()));
+    await start(page, visible.length);
+    const result = await inspect(page);
+    assert.equal(result.mode, 'viewport');
+    assert.equal(result.calls.length, 1);
+    assert.deepEqual(new Set(result.calls[0].texts), new Set(visible));
+    assert.equal(await page.locator('#p399 .et-translation').count(), 0);
+  });
+
+check('legacy defaults migrate scope once and preserve a new explicit whole-page choice', paragraphs(200),
+  { freshInstall: true, storage: { 'et:settings:v1': JSON.stringify({ schemaVersion: 4,
+    fullPage: true, targetLang: 'ja', selection: false, persistentCache: true }) } }, async (page, context) => {
+    assert.deepEqual(await page.evaluate(() => ({
+      scope: window.__TEST.settings.fullPage, language: window.__TEST.settings.targetLang,
+      selection: window.__TEST.settings.selection, cache: window.__TEST.settings.persistentCache,
+    })), { scope: false, language: 'ja', selection: false, cache: true });
+    await change(page, 'fullPage', true);
+    await context.reload();
+    assert.equal(await page.evaluate(() => window.__TEST.settings.fullPage), true);
+    await start(page, 200);
+    assert.equal((await inspect(page)).mode, 'all');
+  });
+
+check('partially failed long paragraphs retain their complete source until retry succeeds',
+  '<p id="source">' + Array.from({ length: 20 }, (_, index) =>
+    'Paragraph part ' + index + ': ' + 'readable context '.repeat(100) + '. ').join('') + 'END_OF_LONG_PARAGRAPH</p>',
+  { settings: { fullPage: true, translationOnly: true }, mock: { statuses: [200, 400, 200] } }, async page => {
+    const before = await page.locator('#source').innerHTML();
+    await page.evaluate(() => window.__TEST.startTranslation());
+    await page.waitForFunction(() => window.__TEST.session.stats.failed > 0 && !window.__TEST.session.busy &&
+      !!document.querySelector('#source .et-translation'));
+    const state = await page.evaluate(() => {
+      const state = window.__TEST.getState(document.getElementById('source'));
+      return { parts: state.chunks.length, failed: state.failedParts.size };
+    });
+    assert.equal(state.parts, 20);
+    assert.equal(state.failed, 7);
+    assert.equal(await page.locator('#source .et-source-hidden').count(), 0);
+    assert.ok((await page.locator('#source').innerText()).includes('END_OF_LONG_PARAGRAPH'));
+    await change(page, 'translationOnly', false);
+    await change(page, 'translationOnly', true);
+    assert.equal(await page.locator('#source .et-source-hidden').count(), 0);
+    await page.evaluate(() => window.__TEST.getUi().retry.click());
+    await page.waitForFunction(() => window.__TEST.getState(document.getElementById('source')).status === 'done' &&
+      !!document.querySelector('#source .et-source-hidden'));
+    assert.ok((await page.locator('#source .et-translation').innerText()).includes('END_OF_LONG_PARAGRAPH'));
+    assert.equal((await inspect(page)).calls.length, 3);
+    await page.evaluate(() => window.__TEST.stopTranslation());
+    assert.equal(await page.locator('#source').innerHTML(), before);
+  });
+
+check('continuous feed additions cannot postpone the complete initial translation round', paragraphs(150),
+  { settings: { fullPage: true }, mock: { latencyMs: 450, delays: [30, 650] } }, async page => {
+    await page.evaluate(() => window.__TEST.startTranslation());
+    await page.waitForFunction(() => window.__TEST.session.stats.done >= 128);
+    assert.equal(await page.locator('.et-translation').count(), 0);
+    await page.evaluate(() => {
+      window.__feedIndex = 0;
+      window.__feedTimer = setInterval(() => document.querySelector('main').insertAdjacentHTML('beforeend',
+        `<p id="feed${++window.__feedIndex}">Live update ${window.__feedIndex}.</p>`), 80);
+    });
+    try {
+      await page.waitForFunction(() => !!document.querySelector('#p149 .et-translation'), null, { timeout: 3500 });
+      assert.deepEqual((await inspect(page)).renders[0].count, 150);
+      assert.ok(await page.evaluate(() => window.__feedIndex > 0));
+      assert.equal(await page.locator('#p0 .et-translation').count(), 1);
+      assert.ok(await page.evaluate(() => window.__TEST.session.inFlight > 0 || window.__TEST.session.queue.length > 0));
+    } finally { await page.evaluate(() => clearInterval(window.__feedTimer)); }
+    const last = await page.evaluate(() => window.__feedIndex);
+    await page.waitForFunction(index => !!document.querySelector(`#feed${index} .et-translation`), last);
+    await idle(page, 150 + last);
+  });
+
+async function selectAndOpen(page, selector) {
+  await page.evaluate(selector => {
+    const range = document.createRange(); range.selectNodeContents(document.querySelector(selector));
+    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  }, selector);
+  await page.waitForFunction(() => !window.__TEST.getUi().selBtn.hidden);
+  await page.evaluate(() => window.__TEST.getUi().selBtn.click());
+}
+
+check('a source edit in the final animation frame keeps the original round atomic', paragraphs(150),
+  {}, async page => {
+    await page.evaluate(() => {
+      window.__frameEdited = false;
+      const watch = () => {
+        if (window.__TEST.session.stats.done >= 150 && !window.__frameEdited) {
+          window.__frameEdited = true;
+          document.getElementById('p0').firstChild.nodeValue = 'Edited immediately before display.';
+        } else if (!window.__frameEdited) requestAnimationFrame(watch);
+      };
+      requestAnimationFrame(watch);
+      window.__TEST.startTranslation();
+    });
+    await page.waitForFunction(() => document.querySelector('#p0 .et-translation')?.textContent ===
+      'microsoft/zh-Hans::Edited immediately before display.');
+    await idle(page, 151);
+    assert.equal(await page.evaluate(() => window.__frameEdited), true);
+    assert.deepEqual((await inspect(page)).renders.map(render => render.count), [150]);
+  });
+
+check('closing a selection card aborts its active request without late results',
+  '<p id="selection">Select this readable phrase.</p>', { mock: { latencyMs: 900 } }, async page => {
+    await selectAndOpen(page, '#selection');
+    await page.waitForFunction(() => window.__calls.length === 1);
+    await page.evaluate(() => window.__TEST.getUi().selClose.click());
+    await page.waitForFunction(() => window.__calls[0].aborted);
+    assert.equal(await page.evaluate(() => window.__TEST.getUi().selCard.hidden), true);
+    await page.waitForTimeout(950);
+    assert.equal(await page.evaluate(() => window.__TEST.getUi().selCard.hidden), true);
+    assert.equal((await inspect(page)).calls.length, 1);
+  });
+
+check('a new selection cancels the old one and only the new result is displayed',
+  '<p id="first">First selected phrase.</p><p id="second">Second selected phrase.</p>',
+  { mock: { delays: [1200, 30] } }, async page => {
+    await selectAndOpen(page, '#first');
+    await page.waitForFunction(() => window.__calls.length === 1);
+    await selectAndOpen(page, '#second');
+    await page.waitForFunction(() => window.__TEST.getUi().selResult.dataset.state === 'done');
+    assert.equal((await inspect(page)).calls[0].aborted, true);
+    assert.equal(await page.evaluate(() => window.__TEST.getUi().selResult.textContent),
+      'microsoft/zh-Hans::Second selected phrase.');
+  });
+
+check('closing a queued selection removes it without interrupting page translation', paragraphs(150),
+  { mock: { latencyMs: 1000 } }, async page => {
+    await page.evaluate(() => window.__TEST.startTranslation());
+    await page.waitForFunction(() => window.__calls.length === 2);
+    await selectAndOpen(page, '#p0');
+    await page.evaluate(() => window.__TEST.getUi().selClose.click());
+    await idle(page, 150);
+    assert.equal((await inspect(page)).calls.length, 2);
+    assert.ok((await inspect(page)).calls.every(call => !call.aborted));
   });

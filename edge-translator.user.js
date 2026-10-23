@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PageLingo — 双语网页翻译
 // @namespace    https://github.com/qinmuran0316/PageLingo
-// @version      0.9.0
+// @version      0.9.1
 // @description  PageLingo：将英文、日文、韩文等网页内容快速翻译成中文，支持中英日韩多种语言和划词翻译
 // @author       qinmuran0316
 // @license      MIT
@@ -34,7 +34,7 @@
   if (window.__EDGE_TRANSLATOR_LOADED__) return;
   window.__EDGE_TRANSLATOR_LOADED__ = true;
 
-  const VERSION = '0.9.0';
+  const VERSION = '0.9.1';
   const HOST_ID = 'et-translator-host';
   const STYLE_ID = 'et-page-style';
   const SETTINGS_KEY = 'et:settings:v1';
@@ -144,13 +144,13 @@
   ]);
 
   const DEFAULTS = {
-    schemaVersion: 4,
+    schemaVersion: 5,
     provider: 'microsoft',
     targetLang: 'zh-CN',
     autoFallback: false,
     allowLowQuality: true,
     selection: true,
-    fullPage: true,
+    fullPage: false,
     translationOnly: true,
     showOriginal: false,
     persistentCache: false,
@@ -570,11 +570,13 @@
     if (!['auto', 'microsoft', 'deepl', 'google', 'mymemory'].includes(merged.provider)) {
       merged.provider = base.provider;
     }
-    merged.schemaVersion = 4;
+    merged.schemaVersion = 5;
     merged.autoFallback = merged.autoFallback !== false;
     merged.selection = merged.selection !== false;
     merged.allowLowQuality = merged.allowLowQuality === true;
-    merged.fullPage = merged.fullPage === true;
+    // Earlier releases enabled forced whole-page work by default. Migrate
+    // that scope once; a new explicit choice remains saved in schema 5.
+    merged.fullPage = parsed.schemaVersion >= 5 && merged.fullPage === true;
     merged.translationOnly = merged.translationOnly === true;
     merged.showOriginal = merged.showOriginal !== false;
     merged.persistentCache = merged.persistentCache !== false;
@@ -1193,6 +1195,7 @@
     scanCandidateChars: 0,
     scopeChars: 0,
     renderQueue: new Map(),
+    renderRound: null,
     renderFrame: 0,
     cleanupJobs: [],
     cleanupHandle: 0,
@@ -1216,7 +1219,7 @@
     characterData: true,
     attributes: true,
     attributeFilter: ['hidden', 'aria-hidden', 'class', 'style', 'translate', 'lang',
-      'open', 'inert', 'contenteditable', 'type', 'title', 'aria-label', 'placeholder', 'alt', 'value', 'label'],
+      'open', 'inert', 'contenteditable', 'type', 'title', 'aria-label', 'placeholder', 'alt', 'value', 'label', 'href'],
   };
 
   let mutationPauseDepth = 0;
@@ -1313,6 +1316,7 @@
     if (session.renderFrame) cancelAnimationFrame(session.renderFrame);
     session.renderFrame = 0;
     session.renderQueue.clear();
+    session.renderRound = null;
     session.queue = [];
     session.inFlight = 0;
     session.busy = false;
@@ -1553,37 +1557,40 @@
   function getSourceFingerprint(el) {
     const payload = getSourcePayload(el);
     const protectedText = payload.protectedNodes.map(node => node.textContent || '').join('\u0001');
-    return payload.text + '\u0001' + protectedText;
+    const filename = githubFilenameInfo(el);
+    return payload.text + '\u0001' + protectedText + (filename ? '\u0001' + filename.href : '');
   }
 
   function githubFilenameInfo(target) {
-    const el = target instanceof AttributeTextTarget ? target.element : target;
-    if (!el || !el.matches || !el.matches('a.Link--primary[title]')) return null;
-    const href = el.getAttribute('href') || '';
-    const hrefPath = href.split(/[?#]/, 1)[0];
-    const hrefPart = hrefPath.split('/').filter(Boolean).pop() || '';
-    let hrefName = hrefPart;
-    try { hrefName = decodeURIComponent(hrefPart); } catch (_) {}
-    // GitHub may translate title/aria-label before the visible filename is
-    // rendered. The repository path remains stable, so use it as the source
-    // of truth and only fall back to the attribute for unusual markup.
-    const name = hrefName || el.getAttribute('title') || '';
-    const aria = el.getAttribute('aria-label') || '';
-    if (!name || !/\b(File|Directory)\)\s*$/.test(aria)) return null;
-    if (!href || !/(?:\/blob\/|\/tree\/)/.test(href)) return null;
+    const source = sourceElement(target);
+    const el = source && source.closest && source.closest('a[href]');
+    if (!el) return null;
     const row = el.closest('tr');
-    if (!row || !row.querySelector('.react-directory-filename-cell,.react-directory-filename-column')) return null;
+    const inTable = row && row.querySelector('.react-directory-filename-cell,.react-directory-filename-column');
+    const inTree = el.closest('[role="treeitem"],[data-testid="file-tree"],[data-testid="repos-file-tree"]');
+    if (!inTable && !inTree) return null;
+    // File labels and accessibility attributes are translated independently.
+    // Only the repository path and structural context identify a filename.
+    const href = el.getAttribute('href') || '';
+    let name;
+    try {
+      const url = new URL(href, location.href);
+      if (!/(?:\/blob\/|\/tree\/)/.test(url.pathname)) return null;
+      name = decodeURIComponent(url.pathname.split('/').filter(Boolean).pop() || '');
+    } catch (_) { return null; }
+    if (!name) return null;
     const match = /^(.+?)(\.[A-Za-z0-9][A-Za-z0-9._-]*)$/.exec(name);
     return {
+      href,
       name,
       base: (match ? match[1] : name).toLowerCase(),
       extension: match ? match[2] : '',
     };
   }
 
-  function applyFilenameFallback(target, text) {
-    const info = githubFilenameInfo(target);
-    const aliases = GITHUB_FILENAME_ALIASES[settings.targetLang];
+  function applyFilenameFallback(state, text) {
+    const info = state.filename;
+    const aliases = GITHUB_FILENAME_ALIASES[state.targetLang];
     if (!info || !aliases || !aliases[info.base]) return text;
     const replacement = aliases[info.base] + info.extension;
     return String(text || '').split(info.name).join(replacement);
@@ -1719,8 +1726,8 @@
         return;
       }
       // Keep independently clickable controls in their original elements.
-      if (el.matches(PAGE_CHROME_SELECTOR) || (!TEXT_FLOW_TAGS.has(el.tagName) &&
-        !el.matches(INTERACTIVE_SELECTOR) && el.querySelector(INTERACTIVE_SELECTOR))) {
+      if (el.matches(PAGE_CHROME_SELECTOR) ||
+        (!el.matches(INTERACTIVE_SELECTOR) && el.querySelector(INTERACTIVE_SELECTOR))) {
         yield* childrenOf(el);
         return;
       }
@@ -1995,6 +2002,7 @@
       if (!session.active || generation !== session.generation || !el.isConnected) return;
       const state = elementStates.get(el);
       if (!state) return;
+      state.rechecking = false;
       if (el instanceof AttributeTextTarget && (!attributeSupported(el.element, el.attribute) ||
         attributeProtected(el.element))) {
         withMutationPaused(() => el.restore());
@@ -2003,19 +2011,24 @@
         session.elements.delete(el);
         session.failedElements.delete(el);
         observed.delete(el);
+        scheduleRenderCommit();
         return;
       }
       if (state.status === 'paused' || state.status === 'queued' || state.status === 'active') return;
       const fingerprint = getSourceFingerprint(el);
       if (fingerprint === state.fingerprint && ((el instanceof AttributeTextTarget && el.translation !== null) ||
         (state.translationEl && state.translationEl.isConnected) ||
-        session.renderQueue.get(el) === state)) return;
+        session.renderQueue.get(el) === state)) {
+        scheduleRenderCommit();
+        return;
+      }
       if (!bumpChangeGuard(el)) {
         state.status = 'paused';
         removeTranslationNode(state.translationEl);
         state.translationEl = null;
         session.failedElements.add(el);
         reportStatus({ kind: 'error', message: '页面内容频繁变化，已暂停此段，可点击重试继续' });
+        scheduleRenderCommit();
         return;
       }
       removeTranslationNode(state.translationEl);
@@ -2024,6 +2037,7 @@
       session.elements.delete(el);
       observed.delete(el);
       enqueueElement(el);
+      scheduleRenderCommit();
     }, 250);
     recheckTimers.set(el, timer);
   }
@@ -2205,37 +2219,84 @@
     });
   }
 
+  function beginRenderRound() {
+    if (session.renderRound || session.scanMode === 'pending' ||
+      (session.scanMode !== 'viewport' && session.scanJobs.length)) return;
+    const round = new Map();
+    for (const el of session.elements) {
+      const state = elementStates.get(el);
+      if (el.isConnected && state && !state.committed) round.set(el, state);
+    }
+    if (round.size) session.renderRound = round;
+  }
+
   function canCommitTranslations() {
-    return session.active && !document.hidden && session.scanMode !== 'pending' &&
-      session.inFlight === 0 && session.queue.length === 0 &&
+    if (!session.active || document.hidden || session.scanMode === 'pending') return false;
+    if (!session.renderRound) return session.inFlight === 0 && session.queue.length === 0 &&
       (session.scanMode === 'viewport' || session.scanJobs.length === 0);
+    // Snapshot a round before its requests start. Later feed updates and scroll
+    // discoveries must not keep the initial page waiting indefinitely.
+    for (const [el, state] of session.renderRound) {
+      if (!el.isConnected || elementStates.get(el) !== state) continue;
+      if (state.rechecking) return false;
+      if (state.pending > 0 && (state.status === 'queued' || state.status === 'active')) return false;
+    }
+    return true;
   }
 
   function scheduleRenderCommit(allowPending = false) {
-    if (!session.active || document.hidden || session.renderFrame || !session.renderQueue.size) return;
+    if (!session.active || document.hidden || session.renderFrame ||
+      (!session.renderQueue.size && !session.renderRound)) return;
     if (!allowPending && !canCommitTranslations()) return;
     const generation = session.generation;
     session.renderFrame = requestAnimationFrame(() => {
       session.renderFrame = 0;
       if (generation !== session.generation || !session.active) return;
+      beginRenderRound();
       if (!allowPending && !canCommitTranslations()) return;
+      if (!session.renderRound) return;
+      const round = session.renderRound;
       const ready = [];
+      const completed = [];
+      let waitingForSource = false;
       // Finish source and layout reads before doing any writes. A slow response
       // must not make an earlier result overwrite content edited in the meantime.
-      for (const [el, state] of session.renderQueue) {
-        session.renderQueue.delete(el);
-        if (!el.isConnected || elementStates.get(el) !== state || state.generation !== generation) continue;
-        if (getSourceFingerprint(el) !== state.fingerprint) {
+      for (const [el, state] of round) {
+        if (el.isConnected && elementStates.get(el) === state && state.pending > 0 &&
+          (state.status === 'queued' || state.status === 'active')) continue;
+        if (state.rechecking) { waitingForSource = true; continue; }
+        const current = el.isConnected && elementStates.get(el) === state && state.generation === generation;
+        const staged = session.renderQueue.get(el) === state;
+        if (current && staged && getSourceFingerprint(el) !== state.fingerprint) {
+          session.renderQueue.delete(el);
+          state.rechecking = true;
+          waitingForSource = true;
           scheduleRecheck(el);
           continue;
         }
-        state.layout = readElementLayout(el);
-        ready.push([el, state]);
+        completed.push([el, state, staged]);
+        if (current && staged) {
+          state.layout = readElementLayout(el);
+          ready.push([el, state]);
+        }
+      }
+      // Validate the entire snapshot before consuming any staged result. A
+      // site edit in this frame must keep the rest of its round together.
+      if (waitingForSource && !allowPending) return;
+      for (const [el, state, staged] of completed) {
+        round.delete(el);
+        state.committed = true;
+        if (staged) session.renderQueue.delete(el);
       }
       withMutationPaused(() => {
         for (const [el, state] of ready) writeElementTranslation(el, state);
       });
+      if (!round.size) {
+        session.renderRound = null;
+        beginRenderRound();
+      }
       pushStatusProgress();
+      if (session.renderQueue.size) scheduleRenderCommit();
     });
   }
 
@@ -2354,7 +2415,7 @@
   function writeElementTranslation(el, state) {
     const values = state.results
       .filter((value) => typeof value === 'string' && value.trim())
-      .map(value => applyFilenameFallback(el, value));
+      .map(value => applyFilenameFallback(state, value));
     if (!values.length) return;
     if (el instanceof AttributeTextTarget) {
       if (state.status === 'done' && attributeSupported(el.element, el.attribute) &&
@@ -2367,10 +2428,20 @@
     if (!node) return;
     writeProtectedTranslation(node, values.join(' '), state);
     node.dataset.state = state.status === 'failed' ? 'error' : state.pending > 0 ? 'loading' : 'done';
-    if (settings.translationOnly && !node.__etSourceWrapper) {
-      node.__etSourceWrapper = wrapSourceContent(el);
-    }
+    syncSourceVisibility(el, node, state);
     updateTranslationTitle(node, state);
+  }
+
+  function syncSourceVisibility(el, node, state) {
+    // A partially translated paragraph must retain its entire source, even in
+    // translation-only mode, so failed chunks never silently disappear.
+    const only = settings.translationOnly && state.failedParts.size === 0;
+    if (only && !node.__etSourceWrapper) node.__etSourceWrapper = wrapSourceContent(el);
+    else if (!only && node.__etSourceWrapper) {
+      unwrapSourceWrapper(node.__etSourceWrapper);
+      node.__etSourceWrapper = null;
+    }
+    node.dataset.mode = only ? 'only' : 'bilingual';
   }
 
   function updateTranslationTitle(node, state) {
@@ -2388,14 +2459,9 @@
         if (!el.isConnected || !node || !node.isConnected) continue;
         const values = state.results
           .filter(value => typeof value === 'string' && value.trim())
-          .map(value => applyFilenameFallback(el, value));
+          .map(value => applyFilenameFallback(state, value));
         if (values.length) writeProtectedTranslation(node, values.join(' '), state);
-        if (settings.translationOnly) node.__etSourceWrapper = wrapSourceContent(el);
-        else if (node.__etSourceWrapper) {
-          unwrapSourceWrapper(node.__etSourceWrapper);
-          node.__etSourceWrapper = null;
-        }
-        node.dataset.mode = settings.translationOnly ? 'only' : 'bilingual';
+        syncSourceVisibility(el, node, state);
         updateTranslationTitle(node, state);
       }
     });
@@ -2432,6 +2498,7 @@
     const state = {
       text,
       fingerprint: getSourceFingerprint(el),
+      filename: githubFilenameInfo(el),
       chunks,
       results: new Array(chunks.length),
       providers: new Array(chunks.length),
@@ -2441,12 +2508,16 @@
       layout: null,
       failedParts: new Set(),
       status: 'queued',
+      committed: false,
       generation: session.generation,
       pending: 0,
       translationEl: null,
     };
     elementStates.set(el, state);
     session.elements.add(el);
+    // A replacement for an existing source belongs to that source's round.
+    // Newly discovered elements still wait for the next display round.
+    if (session.renderRound && session.renderRound.has(el)) session.renderRound.set(el, state);
 
     for (let index = 0; index < chunks.length; index += 1) {
       const cached = cacheGet(state.targetLang, chunks[index], state.scope);
@@ -2668,6 +2739,7 @@
   function pump() {
     if (!session.active || document.hidden) return;
     pruneQueue();
+    beginRenderRound();
     while (session.active && session.inFlight < PAGE_CONCURRENCY && session.queue.length) {
       const batch = pickBatch();
       if (!batch) break;
@@ -2823,6 +2895,7 @@
   window.addEventListener('pagehide', () => {
     flushPersistentCache();
     abortPageRequests();
+    closeSelectionUi();
     if (session.io) session.io.disconnect();
   });
 
@@ -3100,6 +3173,7 @@ details.more[open] summary { margin-bottom: 8px; }
   let selectionResult = '';
   let selectionAnchor = null;
   let selectionToken = 0;
+  let selectionController = null;
   let dragState = null;
 
   function createUi() {
@@ -3762,6 +3836,8 @@ details.more[open] summary { margin-bottom: 8px; }
         hideSelectionBubble();
         return;
       }
+      cancelSelectionRequest();
+      selectionToken += 1;
       selectionText = text;
       selectionAnchor = { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
       showSelectionBubble(rect);
@@ -3790,6 +3866,7 @@ details.more[open] summary { margin-bottom: 8px; }
 
   function openSelectionCard() {
     if (!ui || !selectionText) return;
+    cancelSelectionRequest();
     hideSelectionBubble();
     ui.selSource.textContent = selectionText.length > 160 ? selectionText.slice(0, 160) + '…' : selectionText;
     ui.selResult.textContent = '翻译中…';
@@ -3810,7 +3887,9 @@ details.more[open] summary { margin-bottom: 8px; }
       return;
     }
 
-    translateTexts([text], settings.targetLang, 'selection')
+    const controller = new AbortController();
+    selectionController = controller;
+    translateTexts([text], settings.targetLang, 'selection', { signal: controller.signal })
       .then((result) => {
         if (token !== selectionToken) return;
         const translation = result.translations[0];
@@ -3819,11 +3898,13 @@ details.more[open] summary { margin-bottom: 8px; }
         showSelectionResult(translation, providerLabel(result.provider), token);
       })
       .catch((err) => {
-        if (token !== selectionToken) return;
+        if (token !== selectionToken || isAbortError(err)) return;
         ui.selResult.textContent = '翻译失败：' + (err && err.message ? err.message : '未知错误');
         ui.selResult.dataset.state = 'error';
         ui.selProvider.textContent = '';
         ui.selCopy.disabled = true;
+      }).finally(() => {
+        if (selectionController === controller) selectionController = null;
       });
   }
 
@@ -3855,8 +3936,14 @@ details.more[open] summary { margin-bottom: 8px; }
     ui.selCard.style.top = top + 'px';
   }
 
+  function cancelSelectionRequest() {
+    if (selectionController) selectionController.abort();
+    selectionController = null;
+  }
+
   function closeSelectionUi() {
     selectionToken += 1;
+    cancelSelectionRequest();
     selectionText = '';
     selectionResult = '';
     if (!ui) return;
