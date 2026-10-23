@@ -3205,7 +3205,7 @@ details.more[open] summary { margin-bottom: 8px; }
 
     shadow.innerHTML = `
 <style>${UI_CSS}</style>
-<button class="fab" type="button" data-state="off" aria-label="翻译或恢复原文，右键打开设置" aria-expanded="false">
+<button class="fab" type="button" data-state="off" aria-label="翻译或恢复原文，右键切换设置" aria-expanded="false">
   <span class="glyph">译</span><span class="dot"></span>
 </button>
 <section class="panel" role="dialog" aria-label="PageLingo 双语网页翻译设置" hidden>
@@ -3265,7 +3265,7 @@ details.more[open] summary { margin-bottom: 8px; }
     </div>
   </details>
   <p class="hint">页面较小时自动整页翻译；页面过大时只翻译当前屏幕，滚动后继续。勾选“强制整页”可跳过此限制。</p>
-  <p class="hint">单击“译”翻译或恢复，右键打开设置。自动模式在接口较慢时尝试另一条免费线路，采用先完成的结果；DeepL 仅在失败后兜底。只发送需要翻译的文本。</p>
+  <p class="hint">单击“译”翻译或恢复，右键打开或关闭设置。自动模式在接口较慢时尝试另一条免费线路，采用先完成的结果；DeepL 仅在失败后兜底。只发送需要翻译的文本。</p>
 </section>
 <button class="sel-btn" type="button" hidden aria-label="翻译选中文字">译</button>
 <div class="sel-card" role="dialog" aria-label="划词翻译" hidden>
@@ -3339,7 +3339,7 @@ details.more[open] summary { margin-bottom: 8px; }
     ui.fab.addEventListener('click', (event) => {
       if (event.detail === 0) toggleTranslation();
     });
-    ui.fab.addEventListener('contextmenu', event => { event.preventDefault(); openPanel(); });
+    ui.fab.addEventListener('contextmenu', event => { event.preventDefault(); togglePanel(); });
 
     ui.provider.addEventListener('change', () => {
       const value = ui.provider.value;
@@ -3600,8 +3600,8 @@ details.more[open] summary { margin-bottom: 8px; }
     ui.fab.title = site.disabled
       ? '本网站已禁用，按 ' + settings.shortcuts.panel + ' 打开设置'
       : active
-        ? `单击恢复原文（${settings.shortcuts.toggle}）；右键打开设置`
-        : `单击翻译网页（${settings.shortcuts.toggle}）；右键打开设置`;
+        ? `单击恢复原文（${settings.shortcuts.toggle}）；右键${panelOpen ? '关闭' : '打开'}设置`
+        : `单击翻译网页（${settings.shortcuts.toggle}）；右键${panelOpen ? '关闭' : '打开'}设置`;
     ui.retry.disabled = !active || session.failedElements.size === 0;
     ui.siteAuto.checked = !!site.auto;
     ui.siteDisabled.checked = !!site.disabled;

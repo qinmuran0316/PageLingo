@@ -955,7 +955,7 @@ check('switching display during requests preserves work and commits the chosen m
     assert.deepEqual(result.renders.map(render => render.count), [150]);
   });
 
-check('one mouse click translates, right click opens settings, and another click restores', paragraphs(2),
+check('one mouse click translates, right clicks toggle settings, and another click restores', paragraphs(2),
   {}, async page => {
     const rect = await page.evaluate(() => {
       const rect = window.__TEST.getUi().fab.getBoundingClientRect();
@@ -965,8 +965,11 @@ check('one mouse click translates, right click opens settings, and another click
     await idle(page, 2);
     await page.mouse.click(rect.x, rect.y, { button: 'right' });
     assert.equal(await page.evaluate(() => window.__TEST.getUi().panel.hidden), false);
+    assert.equal(await page.evaluate(() => window.__TEST.getUi().fab.getAttribute('aria-expanded')), 'true');
     assert.equal((await inspect(page)).calls.length, 1);
-    await page.evaluate(() => window.__TEST.getUi().close.click());
+    await page.mouse.click(rect.x, rect.y, { button: 'right' });
+    assert.equal(await page.evaluate(() => window.__TEST.getUi().panel.hidden), true);
+    assert.equal(await page.evaluate(() => window.__TEST.getUi().fab.getAttribute('aria-expanded')), 'false');
     await page.mouse.click(rect.x, rect.y);
     assert.equal(await page.locator('.et-translation').count(), 0);
   });
