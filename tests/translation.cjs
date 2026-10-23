@@ -212,6 +212,15 @@ check('code and icons inside translated blocks stay visible and restore in order
     assert.equal(await page.locator('main').innerHTML(), before);
   });
 
+check('missing inline-code placeholders never remove the original code nodes',
+  '<main><p>Run <code>npm ci</code> then <code>npm test</code>.</p></main>',
+  { settings: { translationOnly: true }, mock: { translations: {
+    'Run [[PGL_CODE_0]] then [[PGL_CODE_1]].': '运行 [[PGL_CODE_0]]。',
+  } } }, async page => {
+    await start(page, 1);
+    assert.deepEqual(await page.locator('.et-translation code').allTextContents(), ['npm ci', 'npm test']);
+  });
+
 check('opening a closed details menu translates its content once it is visible',
   '<main><p>Page introduction.</p><details id="more"><summary>More options</summary>' +
   '<p id="account">Account preferences</p></details></main>', {}, async page => {

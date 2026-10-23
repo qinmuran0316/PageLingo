@@ -2372,6 +2372,7 @@
     const fragment = document.createDocumentFragment();
     let cursor = 0;
     let matched = 0;
+    const matchedIndexes = new Set();
     PROTECTED_TOKEN_RE.lastIndex = 0;
     let match;
     while ((match = PROTECTED_TOKEN_RE.exec(text))) {
@@ -2382,6 +2383,7 @@
         fragment.appendChild(settings.translationOnly
           ? source.cloneNode(true)
           : document.createTextNode(source.textContent || ''));
+        matchedIndexes.add(index);
         matched += 1;
       } else {
         fragment.appendChild(document.createTextNode(match[0]));
@@ -2390,10 +2392,15 @@
     }
     if (cursor < text.length) fragment.appendChild(document.createTextNode(text.slice(cursor)));
 
-    // If a provider drops the protection token, keep the code recoverable
-    // instead of silently removing it from translation-only output.
-    if (state.protectedNodes && state.protectedNodes.length && matched === 0) {
-      for (const source of state.protectedNodes) {
+    // If a provider drops one or more protection tokens, keep every original
+    // inline code node recoverable instead of silently removing it. The missing
+    // nodes are appended after the returned translation because the provider
+    // no longer tells us their intended position.
+    if (state.protectedNodes && state.protectedNodes.length && matched < state.protectedNodes.length) {
+      if (text && text.trim()) fragment.appendChild(document.createTextNode(' '));
+      for (let index = 0; index < state.protectedNodes.length; index += 1) {
+        if (matchedIndexes.has(index)) continue;
+        const source = state.protectedNodes[index];
         fragment.appendChild(settings.translationOnly
           ? source.cloneNode(true)
           : document.createTextNode(source.textContent || ''));

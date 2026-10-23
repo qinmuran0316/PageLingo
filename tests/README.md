@@ -19,7 +19,7 @@ npm run bench
 
 ## 断言内容
 
-`translation.cjs` 包含 94 个测试：
+`translation.cjs` 包含 95 个测试：
 
 - 导航、按钮、菜单、标签页、单字母短词、行内兄弟节点和大块前后的零散文字；中文语言标记中的混合外文。
 - Markdown/README 标题、文件名、版本号、标点句子和行内代码占位符恢复。
